@@ -230,6 +230,27 @@ export function rememberRecentModel(model: string): ModelPrefs {
 export interface LLMResult {
   content: string;
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+  /** Native tool calls requested by the model (empty for plain replies). */
+  tool_calls?: ToolCall[];
+}
+
+/** A single native function call requested by the model. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  /** JSON-encoded arguments object. */
+  arguments: string;
+}
+
+/** Native function-calling tool definition (OpenAI format; adapted per provider). */
+export interface ToolDef {
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, { type: string; description?: string; enum?: string[]; items?: unknown }>;
+    required?: string[];
+  };
 }
 
 export interface LLMOverride {

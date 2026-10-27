@@ -5,6 +5,23 @@ export interface StoredMsg {
   role: 'user' | 'assistant' | 'tool' | 'error';
   text: string;
   ts: string;
+  /** Live tool-activity metadata (ShipChamber-style blocks). */
+  meta?: {
+    label: string;
+    cmd?: string;
+    state: 'running' | 'done' | 'error';
+    /** 'tasks' renders the checklist UI instead of a generic tool block. */
+    kind?: 'tool' | 'tasks';
+    tasks?: SessionTask[];
+  };
+}
+
+export type TaskState = 'pending' | 'in_progress' | 'done';
+
+/** One checklist item of the agent's working plan (ShipChamber todo list). */
+export interface SessionTask {
+  title: string;
+  state: TaskState;
 }
 
 export type SessionAgent = 'pentest' | 'recon' | 'web' | 'privesc' | 'expl' | 'replan';
@@ -46,6 +63,7 @@ export interface Session {
   messages: StoredMsg[];
   forkFrom?: string; // id of the session this was forked from
   goal?: SessionGoal;
+  tasks?: SessionTask[]; // agent's working checklist (latest state)
   groupId?: string; // multi-run group this session belongs to
   model?: string; // per-session model override
   provider?: string; // per-session provider override (with baseUrl)

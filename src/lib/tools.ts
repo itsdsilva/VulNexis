@@ -356,13 +356,30 @@ export function buildToolCommand(
 ): { spec: ToolSpec; command: string } {
   const spec = BY_NAME.get(name);
   if (!spec) throw new ToolError(`Unknown tool: ${name}. Available: ${TOOLS.map((t) => t.name).join(', ')}`);
-  const t = target.trim();
-  if (!t) throw new ToolError(`${name}: target is required`);
-  if (spec.targetKind === 'url' && !/^https?:\/\//i.test(t)) {
-    throw new ToolError(`${name} expects a URL (http/https). Got: ${t}`);
-  }
-  if (spec.targetKind === 'domain' && !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) {
-    throw new ToolError(`${name} expects a domain name. Got: ${t}`);
+  const t0 = target.trim();
+  if (!t0) throw new ToolError(`${name}: target is required`);
+  let t = t0;
+  if (spec.targetKind === 'url') {
+    // Accept bare hosts and comma-separated lists (e.g. subfinder/gau output):
+    // default each entry to https:// before validating.
+    const norm = t0
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((u) => (/^https?:\/\//i.test(u) ? u : `https://${u}`));
+    const bad = norm.find((u) => !/^https?:\/\/[^\s"'`,;$&|]+/i.test(u));
+    if (bad) throw new ToolError(`${name} expects a URL (http/https). Got: ${bad}`);
+    t = norm.join(',');
+  } else if (spec.targetKind === 'domain') {
+    // Accept scheme-prefixed or comma-separated domains: strip scheme/path.
+    const norm = t0
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((d) => d.replace(/^https?:\/\//i, '').replace(/\/.*$/, ''));
+    const bad = norm.find((d) => !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d));
+    if (bad) throw new ToolError(`${name} expects a domain name. Got: ${bad}`);
+    t = norm.join(',');
   }
   const merged: Record<string, string> = {};
   for (const p of spec.params) {
@@ -409,7 +426,9 @@ export function hostnameOf(target: string): string {
   return t.replace(/\/.*$/, '').replace(/:\d+$/, '');
 }
 
-/** Scope gate: only allow tools to run against in-scope targets. */
+/** Scope gate: only allow tools to run against in-scope targets.
+ * Comma-separated lists pass only when every entry is in scope. */
 export function toolTargetInScope(target: string, scope: MissionScope): boolean {
-  return isInScope(hostnameOf(target), scope);
+  const entries = target.split(',').map((s) => s.trim()).filter(Boolean);
+  return entries.length > 0 && entries.every((t) => isInScope(hostnameOf(t), scope));
 }

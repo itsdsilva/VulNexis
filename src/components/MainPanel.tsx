@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Markdown from './Markdown';
 import type { Mission } from '../lib/missions';
 import { forkSession, type GoalState, type PermissionMode, type Session, type SessionGoal, type StoredMsg } from '../lib/store';
@@ -42,25 +42,91 @@ const goalStateStyle: Record<GoalState, { dot: string; chip: string; label: stri
   budget: { dot: 'text-accent-red', chip: 'border-accent-red/40 text-accent-red', label: 'budget reached' },
 };
 
-/** ShipChamber-style collapsible tool block — collapsed by default. */
-function ToolBlock({ text }: { text: string }) {
+/** ShipChamber-style collapsible tool block — spinner while running, result on click. */
+function ToolBlock({ m }: { m: StoredMsg }) {
   const [open, setOpen] = useState(false);
-  const firstLine = (text || '').split('\n').find((l) => l.trim()) ?? 'output';
+  const meta = m.meta;
+  const running = meta?.state === 'running';
+  const failed = meta?.state === 'error';
+  const preview =
+    meta?.cmd || (m.text || '').split('\n').find((l) => l.trim()) || '(no output)';
   return (
-    <div className="rounded-lg border border-bordermuted bg-bg-secondary overflow-hidden">
+    <div
+      className={`rounded-lg border overflow-hidden ${
+        failed ? 'border-accent-red/40 bg-accent-red/[0.06]' : 'border-bordermuted bg-bg-secondary'
+      }`}
+    >
       <button
         onClick={() => setOpen(!open)}
         className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-tertiary/50 transition-colors"
       >
         <span className={`inline-block transition-transform duration-150 ${open ? 'rotate-90' : ''}`}>▸</span>
-        <span className="font-medium">tool output</span>
-        <span className="truncate flex-1 text-left font-mono opacity-60">{firstLine}</span>
+        {running ? (
+          <svg className="animate-spin shrink-0 text-accent-cyan" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+            <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+            <path d="M22 12a10 10 0 0 0-10-10" />
+          </svg>
+        ) : null}
+        <span className={`font-medium ${failed ? 'text-accent-red/90' : ''}`}>{meta?.label ?? 'tool output'}</span>
+        <span className="truncate flex-1 text-left font-mono opacity-60">{preview}</span>
+        {failed && <span className="text-[11px] text-accent-red/80">failed</span>}
       </button>
       {open && (
-        <pre className="px-3 py-2 text-[11px] font-mono text-text-secondary leading-relaxed border-t border-bordermuted overflow-x-auto whitespace-pre-wrap break-words">
-          {text}
+        <pre
+          className={`px-3 py-2 text-[11px] font-mono leading-relaxed border-t ${
+            failed ? 'border-accent-red/30 text-accent-red/90' : 'border-bordermuted text-text-secondary'
+          } overflow-x-auto whitespace-pre-wrap break-words`}
+        >
+          {m.text || '(no output)'}
         </pre>
       )}
+    </div>
+  );
+}
+
+/** ShipChamber-style task checklist: done items are struck off automatically. */
+function TaskListBlock({ m }: { m: StoredMsg }) {
+  const tasks = m.meta?.tasks ?? [];
+  if (!tasks.length) return null;
+  const done = tasks.filter((t) => t.state === 'done').length;
+  return (
+    <div className="rounded-lg border border-bordermuted bg-bg-secondary overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-text-muted border-b border-bordermuted">
+        <span className="font-medium text-text-secondary">Task list</span>
+        <span className="truncate flex-1">
+          {done === tasks.length ? 'all done' : `${tasks.length - done} remaining`}
+        </span>
+        <span className="font-mono text-text-muted">
+          {done}/{tasks.length}
+        </span>
+      </div>
+      <ul className="px-3 py-2 space-y-1.5">
+        {tasks.map((t, i) => (
+          <li key={i} className="flex items-start gap-2 text-[13px] leading-snug">
+            {t.state === 'done' ? (
+              <span className="text-accent-green shrink-0">✓</span>
+            ) : t.state === 'in_progress' ? (
+              <svg className="animate-spin shrink-0 text-accent-cyan mt-0.5" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                <path d="M22 12a10 10 0 0 0-10-10" />
+              </svg>
+            ) : (
+              <span className="text-text-muted shrink-0">○</span>
+            )}
+            <span
+              className={
+                t.state === 'done'
+                  ? 'line-through text-text-muted transition-colors'
+                  : t.state === 'in_progress'
+                    ? 'text-text-primary'
+                    : 'text-text-secondary'
+              }
+            >
+              {t.title}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -72,12 +138,70 @@ interface GoalForm {
   budget: number;
 }
 
+/** Compact anchored dropdown — ShipChamber-style progressive disclosure. */
+function Dropdown({
+  open,
+  onClose,
+  children,
+  align = 'right',
+  dir = 'down',
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+  align?: 'left' | 'right';
+  dir?: 'up' | 'down';
+}) {
+  if (!open) return null;
+  return (
+    <>
+      <div className="fixed inset-0 z-30" onClick={onClose} />
+      <div
+        className={`absolute ${dir === 'up' ? 'bottom-full mb-1.5' : 'top-full mt-1.5'} ${
+          align === 'right' ? 'right-0' : 'left-0'
+        } bg-bg-elevated border border-border rounded-lg shadow-pop z-40 min-w-52 py-1 px-1`}
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
+function MenuItem({
+  onClick,
+  disabled,
+  title,
+  danger,
+  children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  title?: string;
+  danger?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`w-full text-left px-2.5 py-1.5 text-xs rounded-md transition-colors ${
+        danger
+          ? 'text-accent-red hover:bg-accent-red/10'
+          : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
+      } disabled:opacity-40 disabled:hover:bg-transparent`}
+    >
+      {children}
+    </button>
+  );
+}
+
 function formOf(goal: SessionGoal): GoalForm {
   return { title: goal.title, criteria: goal.criteria, maxTurns: goal.maxTurns, budget: goal.budget };
 }
 
 function Message({ m }: { m: StoredMsg }) {
-  if (m.role === 'tool') return <ToolBlock text={m.text} />;
+  if (m.role === 'tool') return m.meta?.kind === 'tasks' ? <TaskListBlock m={m} /> : <ToolBlock m={m} />;
   if (m.role === 'error') {
     return (
       <div className="border-l-2 border-accent-red/60 pl-3 text-xs text-accent-red whitespace-pre-wrap break-words">
@@ -126,6 +250,8 @@ export default function MainPanel({
   const [permission, setPermission] = useState<PermissionMode>('ask');
   const [budget, setBudget] = useState<number>(budgetTokens);
   const [modelOpen, setModelOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [plusOpen, setPlusOpen] = useState(false);
   const [llm, setLlm] = useState<LLMSettings>(() => loadLLMSettings());
   const [prefs, setPrefs] = useState<ModelPrefs>(() => loadModelPrefs());
   const [goalDialog, setGoalDialog] = useState(false);
@@ -459,6 +585,11 @@ export default function MainPanel({
         }`}
       >
         <span className="text-[13px] font-medium truncate">{session?.name ?? 'New chat'}</span>
+        {session?.tasks && session.tasks.length > 0 && (
+          <span className="chip !py-0 border-bordermuted text-text-muted">
+            {session.tasks.filter((t) => t.state === 'done').length}/{session.tasks.length} tasks
+          </span>
+        )}
         {session && session.agent !== 'recon' && (
           <span className={`text-[11px] font-medium ${agentBadge[session.agent] ?? 'text-text-muted'}`}>
             {session.agent}
@@ -474,33 +605,6 @@ export default function MainPanel({
           <span className="chip !py-0 border-accent-purple/25 text-accent-purple">multi-run</span>
         )}
         <div className="flex-1" />
-        {session && (
-          <button
-            onClick={() => onFork(forkSession(session))}
-            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
-            title="Fork this session — copy history into a new session"
-          >
-            fork
-          </button>
-        )}
-        {mission && (
-          <button
-            onClick={onOpenMultiRun}
-            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
-            title="Run the same prompt across several parallel sessions"
-          >
-            multi-run
-          </button>
-        )}
-        {mission && (
-          <button
-            onClick={onOpenPlaybook}
-            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
-            title="Run a pentest-ai playbook — phase-by-phase with manual gates"
-          >
-            playbook
-          </button>
-        )}
         {mission && (
           <div className="flex items-center gap-1.5 text-xs">
             <select
@@ -512,13 +616,57 @@ export default function MainPanel({
               <option value="auto-low">auto-run low risk</option>
               <option value="full">full autopilot</option>
             </select>
+          </div>
+        )}
+        {session && (
+          <div className="relative">
             <button
-              onClick={() => setShowSettings((v) => !v)}
-              className={`text-[11px] px-2 py-1 rounded-md ${showSettings ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'}`}
-              title="Token budget settings"
+              onClick={() => setMenuOpen(!menuOpen)}
+              className={`px-2 py-0.5 rounded-md text-sm ${menuOpen ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'}`}
+              title="Session actions"
             >
-              budget
+              ⋯
             </button>
+            <Dropdown open={menuOpen} onClose={() => setMenuOpen(false)} align="right" dir="down">
+              <MenuItem
+                onClick={() => {
+                  setMenuOpen(false);
+                  onFork(forkSession(session));
+                }}
+              >
+                Fork session
+              </MenuItem>
+              {mission && (
+                <MenuItem
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onOpenMultiRun();
+                  }}
+                >
+                  Multi-run…
+                </MenuItem>
+              )}
+              {mission && (
+                <MenuItem
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onOpenPlaybook();
+                  }}
+                >
+                  Playbook…
+                </MenuItem>
+              )}
+              {mission && (
+                <MenuItem
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setShowSettings((v) => !v);
+                  }}
+                >
+                  {showSettings ? 'Hide token budget' : 'Token budget…'}
+                </MenuItem>
+              )}
+            </Dropdown>
           </div>
         )}
       </div>
@@ -550,7 +698,7 @@ export default function MainPanel({
       {goal && (
         <div className="border-b border-bordermuted bg-bg-secondary/60 px-4 py-2 flex items-center gap-2 text-xs shrink-0">
           <span className={goalStateStyle[goal.state].dot}>◎</span>
-          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${goalStateStyle[goal.state].chip}`}>
+          <span className={`text-[11px] px-1.5 py-0.5 rounded border font-medium ${goalStateStyle[goal.state].chip}`}>
             {goalStateStyle[goal.state].label}
           </span>
           <span className="font-medium truncate max-w-[180px]" title={goal.title}>
@@ -562,7 +710,7 @@ export default function MainPanel({
           <span className="text-text-muted truncate flex-1" title={goal.note}>
             {goal.note || '—'}
           </span>
-          <span className="text-text-muted whitespace-nowrap font-mono text-[10px]">
+          <span className="text-text-muted whitespace-nowrap font-mono text-[11px]">
             turn {goal.turns}/{goal.maxTurns}
           </span>
           {goalActive && (
@@ -617,22 +765,6 @@ export default function MainPanel({
       {/* Composer — ShipChamber style: bordered card, circular send */}
       <div className="px-4 pb-3 pt-1 shrink-0 relative bg-bg-primary">
         <div className="max-w-3xl mx-auto">
-          {mission && (
-            <div className="flex items-center gap-1 pb-1.5 text-xs flex-wrap">
-              <span className="micro-label mr-1">workflows</span>
-              {WORKFLOWS.map((w) => (
-                <button
-                  key={w.id}
-                  onClick={() => runWorkflowById(w.id)}
-                  disabled={!connected || busy}
-                  title={w.description}
-                  className="px-2 py-1 rounded-md text-[11px] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-40 disabled:hover:bg-transparent"
-                >
-                  {w.name}
-                </button>
-              ))}
-            </div>
-          )}
           {goalArmed && (
             <div className="flex items-center gap-2 pb-1.5 text-xs">
               <span className="text-accent-amber">◎ goal armed</span>
@@ -665,7 +797,7 @@ export default function MainPanel({
               className="flex-1 w-full bg-transparent border-0 px-0 py-0.5 text-sm resize-none focus:outline-none focus:ring-0 disabled:opacity-50 placeholder:text-text-disabled"
             />
             <div className="flex items-end justify-between mt-0.5">
-              <span className="text-[10px] text-text-disabled pl-0.5">
+              <span className="text-[11px] text-text-disabled pl-0.5">
                 {listening ? 'listening…' : 'Enter to send · Shift+Enter for a new line'}
               </span>
               <div className="flex items-center gap-1.5">
@@ -698,6 +830,46 @@ export default function MainPanel({
           </div>
           {/* Model picker + goal — ghost row under the composer */}
           <div className="flex items-center gap-1 pt-1.5 text-xs">
+            <div className="relative">
+              <button
+                onClick={() => setPlusOpen(!plusOpen)}
+                className={`px-2 py-1 rounded-md ${
+                  plusOpen ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
+                }`}
+                title="Workflows and actions"
+              >
+                +
+              </button>
+              <Dropdown open={plusOpen} onClose={() => setPlusOpen(false)} align="left" dir="up">
+                {mission && (
+                  <>
+                    <div className="micro-label px-2.5 pt-1 pb-0.5">workflows</div>
+                    {WORKFLOWS.map((w) => (
+                      <MenuItem
+                        key={w.id}
+                        disabled={!connected || busy}
+                        title={w.description}
+                        onClick={() => {
+                          setPlusOpen(false);
+                          runWorkflowById(w.id);
+                        }}
+                      >
+                        {w.name}
+                      </MenuItem>
+                    ))}
+                    <div className="border-t border-bordermuted my-1" />
+                  </>
+                )}
+                <MenuItem
+                  onClick={() => {
+                    setPlusOpen(false);
+                    onNewMission();
+                  }}
+                >
+                  New mission
+                </MenuItem>
+              </Dropdown>
+            </div>
             <button
               onClick={toggleModelOpen}
               className="flex items-center gap-1.5 px-2 py-1 rounded-md text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
@@ -731,14 +903,6 @@ export default function MainPanel({
               <span>◎</span>
               <span>{goal ? 'goal' : 'set goal'}</span>
             </button>
-            {!mission && (
-              <button
-                onClick={onNewMission}
-                className="px-2 py-1 rounded-md text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
-              >
-                + new mission
-              </button>
-            )}
           </div>
         </div>
 
@@ -788,7 +952,7 @@ export default function MainPanel({
                   </div>
                 ))}
               </div>
-              <div className="text-[10px] text-text-disabled border-t border-bordermuted pt-2">
+              <div className="text-[11px] text-text-disabled border-t border-bordermuted pt-2">
                 provider: {llm.provider} · key: {llm.apiKey ? 'configured' : 'missing (set in Settings → AI Model)'}
                 {providerInfo && !providerInfo.models.includes(llm.model) && ' · custom model'}
               </div>
@@ -859,7 +1023,7 @@ export default function MainPanel({
                   </div>
                 </div>
                 {goal && (
-                  <div className="text-[10px] text-text-muted border border-bordermuted rounded-md px-2 py-1.5">
+                  <div className="text-[11px] text-text-muted border border-bordermuted rounded-md px-2 py-1.5">
                     state: {goal.state} · turns used: {goal.turns}/{goal.maxTurns}
                     {goal.note ? ` · last note: ${goal.note}` : ''}
                     {GOAL_TERMINAL.includes(goal.state) && ' · finished — read-only'}

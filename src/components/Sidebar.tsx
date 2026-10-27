@@ -78,7 +78,7 @@ export default function Sidebar({
             key={w.id}
             onClick={() => onWorkspaceChange(w.id)}
             title={w.hint}
-            className={`w-full flex items-center gap-2 px-2 py-[7px] rounded-md text-[13px] transition-colors ${
+            className={`w-full flex items-center gap-2 px-2 py-[7px] rounded-md text-sm transition-colors ${
               workspace === w.id
                 ? 'bg-bg-tertiary text-text-primary font-medium'
                 : 'text-text-secondary hover:bg-bg-tertiary/70 hover:text-text-primary'
@@ -94,7 +94,7 @@ export default function Sidebar({
       <div className="px-2 pt-2">
         <button
           onClick={isAssistant ? onNewSession : onNewMission}
-          className="w-full flex items-center gap-2 px-2 py-[7px] rounded-md text-[13px] text-text-muted hover:bg-bg-tertiary/70 hover:text-text-primary transition-colors"
+          className="w-full flex items-center gap-2 px-2 py-[7px] rounded-md text-sm text-text-muted hover:bg-bg-tertiary/70 hover:text-text-primary transition-colors"
         >
           <span className="w-4 text-center leading-none opacity-80">＋</span>
           <span className="truncate">{isAssistant ? 'New Chat' : 'New Mission'}</span>
@@ -127,9 +127,9 @@ export default function Sidebar({
                         <span className={`text-[9px] font-bold font-mono ${kindBadge[missionKind(m)].cls}`}>
                           {kindBadge[missionKind(m)].label}
                         </span>
-                        <span className="text-xs font-medium truncate">{m.name}</span>
+                        <span className="text-[13px] font-medium truncate">{m.name}</span>
                       </div>
-                      <div className="text-[10px] text-text-muted pl-4">
+                      <div className="text-[11px] text-text-muted pl-4">
                         {m.scope.domains.length + m.scope.ips.length + m.scope.wildcards.length} targets
                       </div>
                     </button>
@@ -202,9 +202,9 @@ export default function Sidebar({
                           ◎
                         </span>
                       )}
-                      <span className="text-xs font-medium truncate">{s.name}</span>
+                      <span className="text-[13px] font-medium truncate">{s.name}</span>
                     </div>
-                    <div className="text-[10px] text-text-muted pl-4">{s.messages.length} messages</div>
+                    <div className="text-[11px] text-text-muted pl-4">{s.messages.length} messages</div>
                   </button>
                   <button
                     onClick={() => onDeleteSession(s.id)}
@@ -232,9 +232,9 @@ export default function Sidebar({
                 >
                   <div className="flex items-center gap-1.5">
                     <span className="text-accent-purple text-[10px]">⚡</span>
-                    <span className="text-xs font-medium truncate">{g.name}</span>
+                    <span className="text-[13px] font-medium truncate">{g.name}</span>
                   </div>
-                  <div className="text-[10px] text-text-muted pl-4">{g.runIds.length} runs</div>
+                  <div className="text-[11px] text-text-muted pl-4">{g.runIds.length} runs</div>
                 </button>
               ))}
             </div>
@@ -245,21 +245,21 @@ export default function Sidebar({
       <div className="px-2 py-2 border-t border-bordermuted space-y-px">
         <button
           onClick={onOpenDashboard}
-          className="w-full px-2 py-[7px] text-left text-[13px] text-text-secondary hover:bg-bg-tertiary/70 hover:text-text-primary rounded-md transition-colors flex items-center justify-between"
+          className="w-full px-2 py-[7px] text-left text-sm text-text-secondary hover:bg-bg-tertiary/70 hover:text-text-primary rounded-md transition-colors flex items-center justify-between"
         >
           <span>Sessions Dashboard</span>
-          <span className="text-[10px] text-text-muted">all missions</span>
+          <span className="text-[11px] text-text-muted">all missions</span>
         </button>
         {!isAssistant && (
           <button
             onClick={onOpenTasks}
-            className="w-full px-2 py-[7px] text-left text-[13px] text-text-secondary hover:bg-bg-tertiary/70 hover:text-text-primary rounded-md transition-colors flex items-center justify-between"
+            className="w-full px-2 py-[7px] text-left text-sm text-text-secondary hover:bg-bg-tertiary/70 hover:text-text-primary rounded-md transition-colors flex items-center justify-between"
           >
             <span>Scheduled Tasks</span>
-            {taskCount > 0 && <span className="text-[10px] text-accent-amber">{taskCount} active</span>}
+            {taskCount > 0 && <span className="text-[11px] text-accent-amber">{taskCount} active</span>}
           </button>
         )}
-        <div className="text-[10px] text-text-disabled px-2 pt-1.5 font-mono">v0.2 — authorized testing only</div>
+        <div className="text-[11px] text-text-disabled px-2 pt-1.5 font-mono">v0.2 — authorized testing only</div>
       </div>
     </aside>
   );

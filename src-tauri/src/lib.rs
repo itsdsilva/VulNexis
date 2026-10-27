@@ -1,4 +1,4 @@
-﻿use russh::client::{self, Handle};
+use russh::client::{self, Handle};
 use russh::keys::PublicKey;
 use russh::{ChannelMsg, Disconnect};
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,6 @@ use tokio::sync::Mutex;
 use std::time::Duration;
 use tauri::State;
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::page;
 use chromiumoxide::Page;
 use futures_util::StreamExt;
 use std::sync::Arc as StdArc;
@@ -56,7 +55,7 @@ fn provider_kind(provider: &str) -> ProviderKind {
     }
 }
 
-pub(crate) const MAX_TOKENS: u32 = 2048;
+pub(crate) const MAX_TOKENS: u32 = 4096;
 pub(crate) const TEMPERATURE: f32 = 0.4;
 
 pub(crate) fn truncate_str(s: &str, max: usize) -> String {
@@ -65,6 +64,8 @@ pub(crate) fn truncate_str(s: &str, max: usize) -> String {
 
 /// Build a provider-specific request. `messages` is always the OpenAI-style
 /// [{role, content}] shape; this adapts the payload, auth headers and URL.
+/// `tools` (native function calling) is passed as OpenAI-format definitions
+/// and adapted per provider; None disables the tools field entirely.
 pub(crate) fn build_chat_request(
     kind: ProviderKind,
     base_url: &str,
@@ -72,22 +73,30 @@ pub(crate) fn build_chat_request(
     model: &str,
     messages: &[ChatMessage],
     stream: bool,
+    tools: Option<&[serde_json::Value]>,
 ) -> Result<reqwest::RequestBuilder, String> {
     let client = reqwest::Client::new();
     let base = base_url.trim_end_matches('/');
     match kind {
         ProviderKind::OpenAICompat => {
             let url = format!("{base}/chat/completions");
+            let mut body = serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "max_tokens": MAX_TOKENS,
+                "temperature": TEMPERATURE,
+                "stream": stream,
+            });
+            if let Some(t) = tools {
+                if !t.is_empty() {
+                    body["tools"] = serde_json::json!(t);
+                    body["tool_choice"] = serde_json::json!("auto");
+                }
+            }
             let mut rb = client
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .json(&serde_json::json!({
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": MAX_TOKENS,
-                    "temperature": TEMPERATURE,
-                    "stream": stream,
-                }));
+                .json(&body);
             if !api_key.is_empty() {
                 rb = rb.header("Authorization", format!("Bearer {api_key}"));
             }
@@ -127,6 +136,21 @@ pub(crate) fn build_chat_request(
             if !system.is_empty() {
                 body["system"] = serde_json::json!(system.join("\n\n"));
             }
+            if let Some(t) = tools {
+                if !t.is_empty() {
+                    let native: Vec<serde_json::Value> = t
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "name": d["name"],
+                                "description": d["description"],
+                                "input_schema": d["parameters"],
+                            })
+                        })
+                        .collect();
+                    body["tools"] = serde_json::json!(native);
+                }
+            }
             Ok(client
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -162,6 +186,23 @@ pub(crate) fn build_chat_request(
                 body["systemInstruction"] =
                     serde_json::json!({"parts": [{"text": system.join("\n\n")}]});
             }
+            if let Some(t) = tools {
+                if !t.is_empty() {
+                    let decls: Vec<serde_json::Value> = t
+                        .iter()
+                        .map(|d| {
+                            let mut params = d["parameters"].clone();
+                            gemini_uppercase_types(&mut params);
+                            serde_json::json!({
+                                "name": d["name"],
+                                "description": d["description"],
+                                "parameters": params,
+                            })
+                        })
+                        .collect();
+                    body["tools"] = serde_json::json!([{ "functionDeclarations": decls }]);
+                }
+            }
             Ok(client
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -169,6 +210,75 @@ pub(crate) fn build_chat_request(
                 .json(&body))
         }
     }
+}
+
+/// Gemini expects OpenAPI-style uppercase type names in function declarations.
+fn gemini_uppercase_types(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(t) = map.get_mut("type") {
+                if let Some(s) = t.as_str() {
+                    *t = serde_json::json!(s.to_uppercase());
+                }
+            }
+            for (_, child) in map.iter_mut() {
+                gemini_uppercase_types(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                gemini_uppercase_types(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Extract native tool calls from a non-streaming response body.
+/// Returns [{id, name, arguments}] with arguments as a JSON string.
+pub(crate) fn extract_tool_calls(kind: ProviderKind, body: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    match kind {
+        ProviderKind::OpenAICompat => {
+            if let Some(arr) = body["choices"][0]["message"]["tool_calls"].as_array() {
+                for tc in arr {
+                    out.push(serde_json::json!({
+                        "id": tc["id"].as_str().unwrap_or(""),
+                        "name": tc["function"]["name"].as_str().unwrap_or(""),
+                        "arguments": tc["function"]["arguments"].as_str().unwrap_or(""),
+                    }));
+                }
+            }
+        }
+        ProviderKind::Anthropic => {
+            if let Some(blocks) = body["content"].as_array() {
+                for b in blocks {
+                    if b["type"] == "tool_use" {
+                        out.push(serde_json::json!({
+                            "id": b["id"].as_str().unwrap_or(""),
+                            "name": b["name"].as_str().unwrap_or(""),
+                            "arguments": serde_json::to_string(&b["input"]).unwrap_or_default(),
+                        }));
+                    }
+                }
+            }
+        }
+        ProviderKind::Gemini => {
+            if let Some(parts) = body["candidates"][0]["content"]["parts"].as_array() {
+                for (i, p) in parts.iter().enumerate() {
+                    if p["functionCall"].is_object() {
+                        out.push(serde_json::json!({
+                            "id": format!("call_{i}"),
+                            "name": p["functionCall"]["name"].as_str().unwrap_or(""),
+                            "arguments": serde_json::to_string(&p["functionCall"]["args"]).unwrap_or_default(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    out.retain(|tc| !tc["name"].as_str().unwrap_or("").is_empty());
+    out
 }
 
 /// Extract (content, usage) from a non-streaming response body.
@@ -240,7 +350,7 @@ async fn llm_chat(
     messages: Vec<ChatMessage>,
 ) -> Result<serde_json::Value, String> {
     let kind = provider_kind(&provider);
-    let rb = build_chat_request(kind, &base_url, &api_key, &model, &messages, false)?;
+    let rb = build_chat_request(kind, &base_url, &api_key, &model, &messages, false, None)?;
     let resp = rb
         .timeout(Duration::from_secs(120))
         .send()
@@ -260,13 +370,14 @@ async fn llm_chat(
 
     let body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
         format!(
-            "LLM bad response (status {status}): {e} — body: {}",
+            "LLM bad response (status {status}): {e} � body: {}",
             truncate_str(&text, 200)
         )
     })?;
 
     let (content, usage) = extract_answer(kind, &body)?;
-    Ok(serde_json::json!({ "content": content, "usage": usage }))
+    let tool_calls = extract_tool_calls(kind, &body);
+    Ok(serde_json::json!({ "content": content, "usage": usage, "tool_calls": tool_calls }))
 }
 
 // ---------- LLM streaming (SSE -> Tauri Channel) ----------
@@ -412,7 +523,11 @@ async fn exec_on(
 
     let mut out = String::from_utf8_lossy(&stdout).to_string();
     let err = String::from_utf8_lossy(&stderr).to_string();
-    if !err.trim().is_empty() {
+    // On success with stdout, stderr is usually tool warning noise (config
+    // notices, progress logs) � only surface it on real failures or when
+    // there is no stdout at all.
+    let failed = matches!(exit_code, Some(c) if c != 0);
+    if !err.trim().is_empty() && (failed || out.trim().is_empty()) {
         out.push_str("\n--- stderr ---\n");
         out.push_str(&err);
     }
@@ -490,7 +605,7 @@ async fn http_fetch(req: HttpFetchReq) -> Result<HttpFetchRes, String> {
         .collect();
     let body = resp.text().await.map_err(|e| e.to_string())?;
     let body = if body.len() > 300_000 {
-        format!("{}\n…[truncated, total {} bytes]", &body[..300_000], body.len())
+        format!("{}\n�[truncated, total {} bytes]", &body[..300_000], body.len())
     } else {
         body
     };

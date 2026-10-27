@@ -3,7 +3,6 @@ import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import MainPanel from './components/MainPanel';
 import MissionIntel from './components/MissionIntel';
-import ShellPanel from './components/ShellPanel';
 import NewMissionModal from './components/NewMissionModal';
 import TasksModal from './components/TasksModal';
 import MultiRunModal, { type RunSpec } from './components/MultiRunModal';
@@ -53,7 +52,6 @@ const kindOf = (w: Workspace): MissionKind | null =>
   w === 'bugbounty' ? 'bugbounty' : w === 'pentest' ? 'pentest' : null;
 
 function App() {
-  const [shellCollapsed, setShellCollapsed] = useState(false);
   const [intelCollapsed, setIntelCollapsed] = useState(false);
   const [missionModalOpen, setMissionModalOpen] = useState(false);
   const [tasksModalOpen, setTasksModalOpen] = useState(false);
@@ -451,17 +449,6 @@ function App() {
           </button>
         )}
       </div>
-      {!shellCollapsed ? (
-        <ShellPanel onCollapse={() => setShellCollapsed(true)} />
-      ) : (
-        <button
-          onClick={() => setShellCollapsed(false)}
-          className="h-6 border-t border-border bg-bg-secondary hover:bg-bg-tertiary text-text-secondary hover:text-text-primary flex items-center justify-center text-xs"
-          title="Show Shell"
-        >
-          ▲
-        </button>
-      )}
       </div>
       {missionModalOpen && (
         <NewMissionModal

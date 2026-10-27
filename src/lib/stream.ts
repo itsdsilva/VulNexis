@@ -10,12 +10,15 @@ import {
   endpoint,
   type LLMResult,
   type LLMOverride,
+  type ToolCall,
+  type ToolDef,
 } from './llm';
 
 export async function callLLMStream(
   messages: { role: string; content: string }[],
   override?: LLMOverride,
-  onDelta?: (fullSoFar: string) => void
+  onDelta?: (fullSoFar: string) => void,
+  tools?: ToolDef[]
 ): Promise<LLMResult> {
   const s = loadLLMSettings();
   const { provider, baseUrl, model } = endpoint(s, override);
@@ -24,9 +27,9 @@ export async function callLLMStream(
     throw new Error(`No API key for ${provider}. Open Settings → AI Model and save a key for it.`);
 
   if (inTauri()) {
-    return await tauriStream(provider, baseUrl, apiKey, model, messages, onDelta);
+    return await tauriStream(provider, baseUrl, apiKey, model, messages, onDelta, tools);
   }
-  return await browserStream(provider, baseUrl, apiKey, model, messages, onDelta);
+  return await browserStream(provider, baseUrl, apiKey, model, messages, onDelta, tools);
 }
 
 function inTauri(): boolean {
@@ -46,7 +49,8 @@ async function tauriStream(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
-  onDelta?: (fullSoFar: string) => void
+  onDelta?: (fullSoFar: string) => void,
+  tools?: ToolDef[]
 ): Promise<LLMResult> {
   let full = '';
   let scheduled = false;
@@ -70,6 +74,7 @@ async function tauriStream(
     apiKey,
     model,
     messages,
+    tools: tools ?? null,
     onEvent: channel,
   });
   onDelta?.(result.content); // final flush with the exact text
@@ -82,7 +87,8 @@ async function browserStream(
   apiKey: string,
   model: string,
   messages: { role: string; content: string }[],
-  onDelta?: (fullSoFar: string) => void
+  onDelta?: (fullSoFar: string) => void,
+  tools?: ToolDef[]
 ): Promise<LLMResult> {
   const kind = providerKind(provider);
   let res: Response;
@@ -90,7 +96,7 @@ async function browserStream(
     res = await fetch(buildSSEUrl(kind, baseUrl, model), {
       method: 'POST',
       headers: sseHeaders(kind, apiKey),
-      body: JSON.stringify(sseBody(kind, model, messages)),
+      body: JSON.stringify(sseBody(kind, model, messages, tools)),
     });
   } catch {
     throw new Error(
@@ -131,7 +137,8 @@ function sseHeaders(kind: string, apiKey: string): Record<string, string> {
 function sseBody(
   kind: string,
   model: string,
-  messages: { role: string; content: string }[]
+  messages: { role: string; content: string }[],
+  tools?: ToolDef[]
 ): Record<string, unknown> {
   if (kind === 'anthropic') {
     const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
@@ -140,11 +147,20 @@ function sseBody(
       .map((m) => ({ role: m.role, content: m.content }));
     return {
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       temperature: 0.4,
       ...(system ? { system } : {}),
       messages: rest,
       stream: true,
+      ...(tools?.length
+        ? {
+            tools: tools.map((d) => ({
+              name: d.name,
+              description: d.description,
+              input_schema: d.parameters,
+            })),
+          }
+        : {}),
     };
   }
   if (kind === 'gemini') {
@@ -155,10 +171,43 @@ function sseBody(
     return {
       contents,
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-      generationConfig: { maxOutputTokens: 2048, temperature: 0.4 },
+      generationConfig: { maxOutputTokens: 4096, temperature: 0.4 },
+      ...(tools?.length
+        ? {
+            tools: [
+              {
+                functionDeclarations: tools.map((d) => ({
+                  name: d.name,
+                  description: d.description,
+                  parameters: geminiSchema(d.parameters),
+                })),
+              },
+            ],
+          }
+        : {}),
     };
   }
-  return { model, messages, max_tokens: 2048, temperature: 0.4, stream: true };
+  return {
+    model,
+    messages,
+    max_tokens: 4096,
+    temperature: 0.4,
+    stream: true,
+    ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
+  };
+}
+
+/** Gemini wants OpenAPI-style uppercase type names. */
+function geminiSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(geminiSchema);
+  if (schema && typeof schema === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(schema as Record<string, unknown>)) {
+      out[k] = k === 'type' && typeof v === 'string' ? v.toUpperCase() : geminiSchema(v);
+    }
+    return out;
+  }
+  return schema;
 }
 
 async function parseSSE(
@@ -173,6 +222,11 @@ async function parseSSE(
   const acc = { full: '' };
   let lastFlush = 0;
   const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const toolAcc: {
+    openai: Map<number, ToolCall>;
+    anthropic: Map<number, ToolCall>;
+    gemini: ToolCall[];
+  } = { openai: new Map(), anthropic: new Map(), gemini: [] };
   const flush = (force = false) => {
     const now = Date.now();
     if (force || now - lastFlush >= 60) {
@@ -180,7 +234,7 @@ async function parseSSE(
       onDelta?.(acc.full);
     }
   };
-  const handleData = makeHandler(kind, acc, usage, flush);
+  const handleData = makeHandler(kind, acc, usage, toolAcc, flush);
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -200,18 +254,31 @@ async function parseSSE(
   }
   if (usage.total_tokens === 0) {
     const pc = messages.reduce((n, m) => n + m.content.length, 0);
+    const cc = [...toolAcc.openai.values(), ...toolAcc.anthropic.values(), ...toolAcc.gemini]
+      .map((t) => t.arguments.length)
+      .reduce((a, b) => a + b, 0);
     usage.prompt_tokens = Math.floor(pc / 4);
-    usage.completion_tokens = Math.floor(acc.full.length / 4);
+    usage.completion_tokens = Math.floor((acc.full.length + cc) / 4);
     usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
   }
   flush(true);
-  return { content: acc.full, usage };
+  const calls = [...toolAcc.openai.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, t]) => t)
+    .concat([...toolAcc.anthropic.entries()].sort((a, b) => a[0] - b[0]).map(([, t]) => t), toolAcc.gemini)
+    .filter((t) => t.name);
+  return { content: acc.full, usage, ...(calls.length ? { tool_calls: calls } : {}) };
 }
 
 function makeHandler(
   kind: string,
   acc: { full: string },
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+  toolAcc: {
+    openai: Map<number, ToolCall>;
+    anthropic: Map<number, ToolCall>;
+    gemini: ToolCall[];
+  },
   flush: (force?: boolean) => void
 ): (data: string) => void {
   return (data: string) => {
@@ -223,9 +290,21 @@ function makeHandler(
       return;
     }
     if (kind === 'anthropic') {
-      if (v.type === 'content_block_delta' && typeof v.delta?.text === 'string' && v.delta.text) {
-        acc.full += v.delta.text;
-        flush();
+      if (v.type === 'content_block_start' && v.content_block?.type === 'tool_use') {
+        toolAcc.anthropic.set(v.index ?? 0, {
+          id: v.content_block.id ?? '',
+          name: v.content_block.name ?? '',
+          arguments: '',
+        });
+      } else if (v.type === 'content_block_delta') {
+        if (typeof v.delta?.text === 'string' && v.delta.text) {
+          acc.full += v.delta.text;
+          flush();
+        }
+        if (v.delta?.type === 'input_json_delta' && typeof v.delta.partial_json === 'string') {
+          const t = toolAcc.anthropic.get(v.index ?? 0);
+          if (t) t.arguments += v.delta.partial_json;
+        }
       } else if (v.type === 'message_start') {
         usage.prompt_tokens = v.message?.usage?.input_tokens ?? 0;
       } else if (v.type === 'message_delta') {
@@ -242,6 +321,13 @@ function makeHandler(
           acc.full += p.text;
           flush();
         }
+        if (p.functionCall?.name) {
+          toolAcc.gemini.push({
+            id: `call_${toolAcc.gemini.length}`,
+            name: p.functionCall.name,
+            arguments: JSON.stringify(p.functionCall.args ?? {}),
+          });
+        }
       }
       if (v.usageMetadata) {
         usage.prompt_tokens = v.usageMetadata.promptTokenCount ?? usage.prompt_tokens;
@@ -250,10 +336,19 @@ function makeHandler(
       }
       return;
     }
-    const t = v.choices?.[0]?.delta?.content;
+    const delta = v.choices?.[0]?.delta;
+    const t = delta?.content;
     if (typeof t === 'string' && t) {
       acc.full += t;
       flush();
+    }
+    for (const tc of delta?.tool_calls ?? []) {
+      const idx = typeof tc.index === 'number' ? tc.index : 0;
+      const cur = toolAcc.openai.get(idx) ?? { id: '', name: '', arguments: '' };
+      if (tc.id) cur.id = tc.id;
+      if (tc.function?.name) cur.name += tc.function.name;
+      if (typeof tc.function?.arguments === 'string') cur.arguments += tc.function.arguments;
+      toolAcc.openai.set(idx, cur);
     }
     if (v.usage) {
       usage.prompt_tokens = v.usage.prompt_tokens ?? usage.prompt_tokens;

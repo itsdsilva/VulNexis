@@ -1,8 +1,8 @@
 // VulNexis agent engine: one turn runner used by chat UI and scheduled tasks
-import { callLLM } from './llm';
+import { callLLM, loadLLMSettings, endpoint, type ToolCall, type ToolDef } from './llm';
 import { callLLMStream } from './stream';
 import { sshExec, sshDetectTools } from './ssh';
-import { type GoalState, type PermissionMode, type Session, type SessionGoal, type StoredMsg } from './store';
+import { type GoalState, type PermissionMode, type Session, type SessionGoal, type SessionTask, type StoredMsg } from './store';
 import type { Mission } from './missions';
 import {
   TOOLS,
@@ -10,7 +10,6 @@ import {
   buildToolCommand,
   cacheGet,
   cacheSet,
-  hostnameOf,
   toolTargetInScope,
 } from './tools';
 import { browserClick, browserLaunch, browserNavigate, browserSnapshot, browserType } from './browser';
@@ -24,7 +23,7 @@ const AGENT_EXTRAS: Record<string, string> = {
   replan: 'Re-evaluate the current plan based on all findings so far and propose next steps.',
 };
 
-const MAX_STEPS = 12;
+const MAX_STEPS = 16;
 
 function now() {
   return new Date().toISOString();
@@ -52,6 +51,23 @@ function removeMsg(s: Session, idx: number): Session {
   return { ...s, messages: s.messages.filter((_, i) => i !== idx), updatedAt: now() };
 }
 
+/** ShipChamber-style live tool block: appears instantly with a spinner. */
+function appendRunning(s: Session, label: string, cmd: string): { session: Session; idx: number } {
+  const next = append(s, { role: 'tool', text: '', meta: { label, cmd, state: 'running' } });
+  return { session: next, idx: next.messages.length - 1 };
+}
+
+/** Fill in the live block in place once the tool finishes or fails. */
+function patchTool(s: Session, idx: number, text: string, state: 'done' | 'error'): Session {
+  return {
+    ...s,
+    messages: s.messages.map((m, i) =>
+      i === idx ? { ...m, text, meta: { ...(m.meta ?? { label: 'Tool', cmd: '', state: 'running' }), state } } : m
+    ),
+    updatedAt: now(),
+  };
+}
+
 function stripFences(t: string): string {
   let x = t.trim();
   if (x.startsWith('```')) {
@@ -69,7 +85,7 @@ function toolCatalog(): string {
   ).join('\n');
 }
 
-function systemPrompt(mission: Mission | null, tools: string[], agent: string): string {
+function systemPrompt(mission: Mission | null, tools: string[], agent: string, native: boolean): string {
   if (!mission) {
     return `You are VulNexis, a concise AI assistant with deep cybersecurity expertise (bug bounty, penetration testing, Kali Linux tooling).
 The user is chatting outside of any mission, so you cannot run commands right now. Answer questions, explain concepts, help plan assessments, and suggest what to test — if the user wants you to actually run something, tell them to create a Mission and connect their Kali VM.
@@ -84,6 +100,33 @@ Be helpful and concise.`;
   };
   const intensity = mission.intensity ?? 'normal';
   const bb = mission.kind === 'bugbounty';
+  const taskProtocol = `TASK LIST PROTOCOL (the UI renders this as a live checklist):
+- Before starting work, send your plan via the update_tasks ${native ? 'function' : 'action'}: 3-8 focused tasks.
+- Re-send the FULL list every time state changes: mark a task in_progress right before working on it, done as soon as it is finished (the UI strikes it off), and add new tasks as you discover more work.
+- One task in_progress at a time; never mark anything done without evidence in the tool output.`;
+  const rules = `RULES:
+1. Authorized testing only. No destructive actions, no DoS, no credential brute-forcing, no exploit payloads for live targets.
+2. For WAPT: start with browser_launch + browser_navigate to the in-scope URL, take browser_snapshot to map forms/links/inputs, discover auth flows. Test methodically for: IDOR, broken access control, auth/session flaws, XSS, CSRF, SQLi, SSRF, file upload, business logic. Document findings with evidence.
+3. Prefer safe testing.${native ? '' : ' One action per response.'}
+4. Targets must be inside the mission scope. Subdomains/URLs discovered by tools are often out of scope — check every host against the scope list before targeting it, drop out-of-scope ones silently, and keep working on in-scope targets.
+5. Auto-fix on error: when a step fails or is refused (out-of-scope target, bad flag, tool missing), read the error, diagnose the cause, and immediately retry with a corrected command/params/approach — up to 2 fix attempts — then skip it and continue. Never stop the whole task because one step failed.
+6. Work your task list top-down: keep exactly one task in_progress, strike it off by sending an updated list as soon as it is finished.
+7. Be concise and actionable.`;
+  const actionProtocol = native
+    ? `${taskProtocol}
+
+HOW TO ACT (native tool calling):
+- Call the available functions directly — several independent calls per response are allowed.
+- Registered tools are exposed as functions: pass target (in-scope) and optional params.
+- Use suggest_command only when no registered tool fits; use update_tasks for your checklist.
+- When you have a final answer, question, or plan for the user, reply in plain text (no tool call).`
+    : `${taskProtocol}
+
+Respond ONLY with a single JSON object (no markdown, no code fences):
+- {"action":"update_tasks","tasks":[{"title":"...","state":"pending|in_progress|done"}]}
+- {"action":"run_tool","tool":"<tool name>","target":"<in-scope target; a comma-separated list is allowed but every host must be in scope>","params":{...},"reason":"<why>"}
+- {"action":"suggest_command","command":"<exact shell command>","reason":"<why>","risk":"low|medium|high"}
+- {"action":"respond","message":"<text>"}`;
   return `You are VulNexis, an expert Web Application Penetration Testing (WAPT) agent with a built-in browser. You can drive the browser to map authenticated apps, fill forms, click flows, capture requests/responses, and identify vulnerabilities. You also have Kali SSH tools available.
 
 MISSION SCOPE (STRICT - never target anything outside this):
@@ -101,24 +144,25 @@ ${toolCatalog()}
 
 AGENT FOCUS: ${AGENT_EXTRAS[agent] ?? AGENT_EXTRAS.pentest}
 
-RULES:
-1. Authorized testing only. No destructive actions, no DoS, no credential brute-forcing, no exploit payloads for live targets.
-2. For WAPT: start with browser_launch + browser_navigate to the in-scope URL, take browser_snapshot to map forms/links/inputs, discover auth flows. Test methodically for: IDOR, broken access control, auth/session flaws, XSS, CSRF, SQLi, SSRF, file upload, business logic. Document findings with evidence.
-3. Prefer safe testing. One action per response.
-4. Targets must be inside the mission scope.
-5. If a command fails, read the error and adapt.
-6. Be concise and actionable.
+${rules}
 
-Respond ONLY with a single JSON object (no markdown, no code fences):
-- {"action":"run_tool","tool":"<tool name>","target":"<in-scope target>","params":{...},"reason":"<why>"}
-- {"action":"suggest_command","command":"<exact shell command>","reason":"<why>","risk":"low|medium|high"}
-- {"action":"respond","message":"<text>"}
+${actionProtocol}
 `;
 }
 
 function toChatHistory(messages: StoredMsg[]): { role: string; content: string }[] {
   return messages.map((m) => {
-    if (m.role === 'tool') return { role: 'user', content: `TOOL OUTPUT:\n${m.text}` };
+    if (m.role === 'tool') {
+      if (m.meta?.kind === 'tasks' && m.meta.tasks?.length) {
+        const list = m.meta.tasks
+          .map((t) => `[${t.state === 'done' ? 'x' : t.state === 'in_progress' ? '~' : ' '}] ${t.title}`)
+          .join('\n');
+        return { role: 'user', content: `TASK LIST (current state):\n${list}` };
+      }
+      return m.meta?.state === 'error'
+        ? { role: 'user', content: `ERROR:\n${m.text}` }
+        : { role: 'user', content: `TOOL OUTPUT:\n${m.text}` };
+    }
     if (m.role === 'error') return { role: 'user', content: `ERROR:\n${m.text}` };
     return { role: m.role, content: m.text };
   });
@@ -136,6 +180,135 @@ function modelOverride(session: Session) {
   return session.model
     ? { model: session.model, provider: session.provider, baseUrl: session.baseUrl }
     : undefined;
+}
+
+/** Providers that rejected the native tools field — cached so we don't retry every turn. */
+const nativeToolsBlocked = new Set<string>();
+
+/** JSON schema for one registry param. */
+function paramSchema(name: string, description: string, required: boolean) {
+  return { name, schema: { type: 'string', description }, required };
+}
+
+/** Native function-calling definitions built from the tool registry. */
+function toolDefs(available: string[]): ToolDef[] {
+  const defs: ToolDef[] = [];
+  const avail = new Set(available);
+  for (const spec of TOOLS) {
+    // Built-in browser tools aren't SSH binaries — always offered.
+    if (!spec.name.startsWith('browser_') && available.length && !avail.has(spec.name)) continue;
+    const props: Record<string, { type: string; description?: string; enum?: string[]; items?: unknown }> = {
+      target: {
+        type: 'string',
+        description: `Target (${spec.targetKind}); URL, domain or comma-separated list. Must be in mission scope.`,
+      },
+    };
+    const required = ['target'];
+    for (const p of spec.params) {
+      const { name, schema } = paramSchema(p.name, `${p.description}${p.default ? ` (default: ${p.default})` : ''}`, false);
+      props[name] = schema;
+      if (p.default) required.push(p.name);
+    }
+    defs.push({
+      name: spec.name,
+      description: `[${spec.risk} risk, ${spec.category}] ${spec.description}`,
+      parameters: { type: 'object', properties: props, required },
+    });
+  }
+  defs.push({
+    name: 'update_tasks',
+    description: 'Create or update your working task checklist. Send the FULL list every time; the UI strikes off done tasks.',
+    parameters: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array',
+          description: 'The full task list',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Short task description' },
+              state: { type: 'string', enum: ['pending', 'in_progress', 'done'] },
+            },
+            required: ['title', 'state'],
+          },
+        },
+      },
+      required: ['tasks'],
+    },
+  });
+  defs.push({
+    name: 'suggest_command',
+    description: 'Propose a free-form shell command for approval (only when no registered tool fits).',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Exact shell command' },
+        reason: { type: 'string', description: 'Why this command' },
+        risk: { type: 'string', enum: ['low', 'medium', 'high'] },
+      },
+      required: ['command'],
+    },
+  });
+  return defs;
+}
+
+/** One action the model requested this step. */
+type StepCall =
+  | { kind: 'tasks'; tasks: any[] }
+  | { kind: 'suggest'; command: string; reason: string; risk: string }
+  | { kind: 'tool'; tool: string; target: string; params: Record<string, unknown> | undefined; reason: string };
+
+/** Map a native tool call to a StepCall (function args = target + params). */
+function stepCallFromNative(tc: ToolCall): StepCall {
+  let args: Record<string, unknown> = {};
+  try {
+    const p = JSON.parse(tc.arguments || '{}');
+    if (p && typeof p === 'object' && !Array.isArray(p)) args = p;
+  } catch {
+    /* empty args */
+  }
+  if (tc.name === 'update_tasks') return { kind: 'tasks', tasks: Array.isArray(args.tasks) ? args.tasks : [] };
+  if (tc.name === 'suggest_command')
+    return {
+      kind: 'suggest',
+      command: String(args.command ?? ''),
+      reason: String(args.reason ?? ''),
+      risk: String(args.risk ?? 'low'),
+    };
+  const params: Record<string, unknown> = { ...args };
+  delete params.target;
+  return {
+    kind: 'tool',
+    tool: tc.name,
+    target: String(args.target ?? ''),
+    params: Object.keys(params).length ? params : undefined,
+    reason: '',
+  };
+}
+
+/** Map a legacy JSON action to a StepCall, a final reply, or nothing. */
+function stepCallFromLegacy(parsed: any, content: string): StepCall | { final: string } | undefined {
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.action !== 'string') return undefined;
+  if (parsed.action === 'update_tasks' && Array.isArray(parsed.tasks)) return { kind: 'tasks', tasks: parsed.tasks };
+  if (parsed.action === 'suggest_command' && typeof parsed.command === 'string')
+    return {
+      kind: 'suggest',
+      command: parsed.command,
+      reason: String(parsed.reason ?? ''),
+      risk: String(parsed.risk ?? 'low'),
+    };
+  if (parsed.action === 'run_tool' && typeof parsed.tool === 'string')
+    return {
+      kind: 'tool',
+      tool: parsed.tool,
+      target: String(parsed.target ?? ''),
+      params: parsed.params && typeof parsed.params === 'object' ? parsed.params : undefined,
+      reason: String(parsed.reason ?? ''),
+    };
+  if (parsed.action === 'respond')
+    return { final: typeof parsed.message === 'string' && parsed.message ? parsed.message : content };
+  return undefined;
 }
 
 export interface RunTurnOpts {
@@ -180,14 +353,15 @@ export async function runTurn(
       opts.onUpdate(session);
       return session;
     }
-    session = append(session, { role: 'tool', text: `Running: ${pendingCmd}` });
+    const run = appendRunning(session, 'Shell command', pendingCmd);
+    session = run.session;
     opts.onUpdate(session);
     try {
       const out = await sshExec(pendingCmd);
-      session = append(session, { role: 'tool', text: out.trim() || '(no output)' });
+      session = patchTool(session, run.idx, out.trim() || '(no output)', 'done');
       opts.onUpdate(session);
     } catch (e) {
-      session = append(session, { role: 'error', text: String(e) });
+      session = patchTool(session, run.idx, String(e), 'error');
       opts.onUpdate(session);
     }
   }
@@ -197,7 +371,7 @@ export async function runTurn(
   if (!mission) {
     const history = toChatHistory(session.messages).slice(-24);
     const msgs = [
-      { role: 'system', content: systemPrompt(null, [], session.agent) },
+      { role: 'system', content: systemPrompt(null, [], session.agent, false) },
       ...history,
     ];
     let liveIdx = -1;
@@ -241,9 +415,17 @@ export async function runTurn(
       break;
     }
 
+    // Native function-calling when the provider supports it; legacy JSON
+    // protocol otherwise. A provider that rejected the tools field once is
+    // cached so we don't retry native mode every step.
+    const override = modelOverride(session);
+    const { provider } = endpoint(loadLLMSettings(), override);
+    const native = !nativeToolsBlocked.has(provider);
+    const defs = native ? toolDefs(tools) : undefined;
+
     const history = toChatHistory(session.messages).slice(-16);
     const msgs = [
-      { role: 'system', content: systemPrompt(mission, tools, session.agent) },
+      { role: 'system', content: systemPrompt(mission, tools, session.agent, native) },
       ...history,
     ];
     let res;
@@ -253,15 +435,21 @@ export async function runTurn(
       session = live.session;
       liveIdx = live.idx;
       opts.onUpdate(session);
-      res = await callLLMStream(msgs, modelOverride(session), (full) => {
+      res = await callLLMStream(msgs, override, (full) => {
         session = patchMsg(session, liveIdx, full);
         opts.onUpdate(session);
-      });
+      }, defs);
       session = removeMsg(session, liveIdx);
       liveIdx = -1;
       opts.onUpdate(session);
     } catch (e) {
       if (liveIdx >= 0) session = removeMsg(session, liveIdx);
+      // Some OpenAI-compatible providers reject the tools field outright —
+      // fall back to the legacy JSON protocol for this provider and retry.
+      if (defs && /tool|function/i.test(String(e))) {
+        nativeToolsBlocked.add(provider);
+        continue;
+      }
       session = append(session, { role: 'error', text: String(e) });
       opts.onUpdate(session);
       break;
@@ -275,63 +463,63 @@ export async function runTurn(
     opts.onUsage(usage);
     used += usage.total;
 
-    let parsed: any = null;
-    try {
-      parsed = JSON.parse(stripFences(res.content));
-    } catch {
-      parsed = null;
+    // Normalize this step's actions: native tool calls first, else the
+    // legacy JSON protocol (also tried in native mode — some models still
+    // answer in the old format).
+    let actions: StepCall[] = [];
+    let finalText: string | null = null;
+    if (res.tool_calls?.length) {
+      actions = res.tool_calls.map(stepCallFromNative);
+    }
+    if (!actions.length) {
+      let parsed: any = null;
+      try {
+        parsed = JSON.parse(stripFences(res.content));
+      } catch {
+        parsed = null;
+      }
+      const mapped = stepCallFromLegacy(parsed, res.content);
+      if (mapped) {
+        if ('final' in mapped) finalText = mapped.final;
+        else actions = [mapped];
+      } else {
+        finalText = res.content;
+      }
     }
 
-    if (parsed?.action === 'suggest_command' && typeof parsed.command === 'string') {
-      const risk: string = parsed.risk ?? 'low';
-      session = append(session, {
-        role: 'assistant',
-        text: `$ ${parsed.command}\n${parsed.reason ? parsed.reason + '\n' : ''}[risk: ${risk}]`,
-      });
+    // Plain reply: the turn's final answer for the user.
+    if (!actions.length || finalText !== null) {
+      session = append(session, { role: 'assistant', text: finalText ?? res.content });
       opts.onUpdate(session);
-
-      const allowed =
-        opts.connected && (opts.permission === 'full' || (opts.permission === 'auto-low' && risk === 'low'));
-      if (!allowed) {
-        session = append(session, {
-          role: 'assistant',
-          text: opts.connected
-            ? 'Awaiting your approval. Reply "run" to execute it, or give different instructions.'
-            : 'Kali is not connected. Connect in Settings to run commands.',
-        });
-        opts.onUpdate(session);
-        break;
-      }
-
-      try {
-        const out = await sshExec(parsed.command);
-        session = append(session, { role: 'tool', text: out.trim() || '(no output)' });
-        opts.onUpdate(session);
-      } catch (e) {
-        session = append(session, { role: 'error', text: String(e) });
-        opts.onUpdate(session);
-        continue;
-      }
-      continue;
+      break;
     }
 
-    // Structured tool invocation: registry builds the command from params
-    if (parsed?.action === 'run_tool' && typeof parsed.tool === 'string') {
-      try {
-        const target = String(parsed.target ?? '');
-        const { spec, command } = buildToolCommand(parsed.tool, target, parsed.params);
-        if (!toolTargetInScope(target, mission.scope)) {
-          session = append(session, {
-            role: 'error',
-            text: `Refused: ${hostnameOf(target) || target} is not in the mission scope.`,
+    let stopTurn = false;
+    for (const a of actions) {
+      if (a.kind === 'tasks') {
+        const tasks: SessionTask[] = a.tasks
+          .filter((t: any) => t && typeof t.title === 'string' && t.title.trim())
+          .slice(0, 20)
+          .map((t: any) => ({
+            title: t.title.trim().slice(0, 120),
+            state: (['pending', 'in_progress', 'done'] as const).includes(t.state) ? t.state : 'pending',
+          }));
+        if (tasks.length) {
+          session = append({ ...session, tasks }, {
+            role: 'tool',
+            text: '',
+            meta: { label: 'Task list', state: 'done', kind: 'tasks', tasks },
           });
           opts.onUpdate(session);
-          break;
         }
-        const risk: string = spec.risk;
+        continue;
+      }
+
+      if (a.kind === 'suggest') {
+        const risk = ['low', 'medium', 'high'].includes(a.risk) ? a.risk : 'low';
         session = append(session, {
           role: 'assistant',
-          text: `$ ${command}\n${parsed.reason ? parsed.reason + '\n' : ''}[tool: ${spec.name}, risk: ${risk}]`,
+          text: `$ ${a.command}\n${a.reason ? a.reason + '\n' : ''}[risk: ${risk}]`,
         });
         opts.onUpdate(session);
 
@@ -345,76 +533,143 @@ export async function runTurn(
               : 'Kali is not connected. Connect in Settings to run commands.',
           });
           opts.onUpdate(session);
+          stopTurn = true;
           break;
         }
 
-        // Handle built-in browser tools
+        const run = appendRunning(session, 'Shell command', a.command);
+        session = run.session;
+        opts.onUpdate(session);
+        try {
+          const out = await sshExec(a.command);
+          session = patchTool(session, run.idx, out.trim() || '(no output)', 'done');
+          opts.onUpdate(session);
+        } catch (e) {
+          session = patchTool(session, run.idx, String(e), 'error');
+          opts.onUpdate(session);
+        }
+        continue;
+      }
+
+      // Registry tool run: scope gate first, then command build + exec.
+      try {
+        const rawTarget = a.target;
+        const entries = rawTarget.split(',').map((s) => s.trim()).filter(Boolean);
+        const kept = entries.filter((t) => toolTargetInScope(t, mission.scope));
+        const dropped = entries.filter((t) => !toolTargetInScope(t, mission.scope));
+        if (!kept.length) {
+          session = append(session, {
+            role: 'error',
+            text: `Refused: no in-scope target in "${rawTarget || '(empty)'}". Skip out-of-scope hosts and continue with in-scope targets.`,
+          });
+          opts.onUpdate(session);
+          continue;
+        }
+        const target = kept.join(',');
+        const { spec, command } = buildToolCommand(a.tool, target, a.params);
+        const risk: string = spec.risk;
+        session = append(session, {
+          role: 'assistant',
+          text: `$ ${command}\n${a.reason ? a.reason + '\n' : ''}[tool: ${spec.name}, risk: ${risk}]`,
+        });
+        opts.onUpdate(session);
+
+        const allowed =
+          opts.connected && (opts.permission === 'full' || (opts.permission === 'auto-low' && risk === 'low'));
+        if (!allowed) {
+          session = append(session, {
+            role: 'assistant',
+            text: opts.connected
+              ? 'Awaiting your approval. Reply "run" to execute it, or give different instructions.'
+              : 'Kali is not connected. Connect in Settings to run commands.',
+          });
+          opts.onUpdate(session);
+          stopTurn = true;
+          break;
+        }
+
+        // Handle built-in browser tools — one live block per op
         if (command.startsWith('browser:')) {
+          const parts = command.split(/\s+/);
+          const op = parts[0];
+          const arg = parts.slice(1).join(' ');
+          const BL: Record<string, string> = {
+            'browser:launch': 'Browser launch',
+            'browser:navigate': 'Browser navigate',
+            'browser:snapshot': 'Browser snapshot',
+            'browser:click': 'Browser click',
+            'browser:type': 'Browser type',
+          };
+          const run = appendRunning(session, BL[op] ?? op, arg);
+          session = run.session;
+          opts.onUpdate(session);
           try {
-            const parts = command.split(/\s+/);
-            const op = parts[0];
             if (op === 'browser:launch') {
               const out = await browserLaunch(parts[1] !== 'false');
-              session = append(session, { role: 'tool', text: `Browser launched: ${out}` });
-              opts.onUpdate(session);
+              session = patchTool(session, run.idx, `Browser launched: ${out}`, 'done');
             } else if (op === 'browser:navigate') {
-              const url = parts.slice(1).join(' ');
-              const out = await browserNavigate(url);
-              session = append(session, { role: 'tool', text: `Navigated: ${out}` });
-              opts.onUpdate(session);
+              const out = await browserNavigate(arg);
+              session = patchTool(session, run.idx, `Navigated: ${out}`, 'done');
             } else if (op === 'browser:snapshot') {
               const snap = await browserSnapshot();
-              const summary = `URL: ${snap.url}\nTitle: ${snap.title}\nForms: ${snap.forms.length}\nLinks: ${snap.links.length}\nInputs: ${snap.inputs.length}\nHTML: ${snap.html.slice(0, 800)}...`;
-              session = append(session, { role: 'tool', text: summary });
-              opts.onUpdate(session);
+              const summary = `URL: ${snap.url}\nTitle: ${snap.title}\nForms: ${snap.forms.length}\nLinks: ${snap.links.length}\nInputs: ${snap.inputs.length}\n\nHTML:\n${snap.html.slice(0, 1200)}${snap.html.length > 1200 ? '\n… (truncated)' : ''}`;
+              session = patchTool(session, run.idx, summary, 'done');
             } else if (op === 'browser:click') {
-              const sel = parts.slice(1).join(' ');
+              const sel = arg;
               await browserClick({ selector: sel });
-              session = append(session, { role: 'tool', text: `Clicked: ${sel}` });
-              opts.onUpdate(session);
+              session = patchTool(session, run.idx, `Clicked: ${sel}`, 'done');
             } else if (op === 'browser:type') {
               const sel = parts[1];
               const val = parts.slice(2).join(' ');
               await browserType(sel, val);
-              session = append(session, { role: 'tool', text: `Typed into ${sel}` });
-              opts.onUpdate(session);
+              session = patchTool(session, run.idx, `Typed into ${sel}: ${val}`, 'done');
             } else {
-              session = append(session, { role: 'error', text: `Unknown browser op: ${op}` });
-              opts.onUpdate(session);
+              session = patchTool(session, run.idx, `Unknown browser op: ${op}`, 'error');
             }
+            opts.onUpdate(session);
           } catch (e) {
-            session = append(session, { role: 'error', text: String(e) });
+            session = patchTool(session, run.idx, String(e), 'error');
             opts.onUpdate(session);
           }
           continue;
         }
 
-        const cached = cacheGet(command);
-        let out: string;
-        if (cached !== undefined) {
-          out = cached;
-          session = append(session, { role: 'assistant', text: '(cached, 30 min TTL)' });
-          opts.onUpdate(session);
-        } else {
-          out = await sshExec(command);
-          out = out.trim() || '(no output)';
-          cacheSet(command, out);
-        }
-        const capped = out.length > 4000 ? out.slice(0, 4000) + '\n… (truncated)' : out;
-        session = append(session, { role: 'tool', text: capped });
+        const run = appendRunning(session, `Shell — ${spec.name}`, command);
+        session = run.session;
         opts.onUpdate(session);
+        try {
+          const cached = cacheGet(command);
+          let out: string;
+          if (cached !== undefined) {
+            out = cached;
+          } else {
+            out = await sshExec(command);
+            out = out.trim() || '(no output)';
+            cacheSet(command, out);
+          }
+          const capped = out.length > 4000 ? out.slice(0, 4000) + '\n… (truncated)' : out;
+          const droppedNote = dropped.length ? `(skipped out-of-scope: ${dropped.join(', ')})\n` : '';
+          session = patchTool(
+            session,
+            run.idx,
+            `${droppedNote}${cached !== undefined ? `${capped}\n(served from cache, 30 min TTL)` : capped}`,
+            'done'
+          );
+          opts.onUpdate(session);
+        } catch (e) {
+          session = patchTool(session, run.idx, String(e), 'error');
+          opts.onUpdate(session);
+        }
         continue;
       } catch (e) {
         const msg = e instanceof ToolError ? String(e) : `run_tool failed: ${String(e)}`;
         session = append(session, { role: 'error', text: msg });
         opts.onUpdate(session);
+        stopTurn = true;
         break;
       }
     }
-
-    session = append(session, { role: 'assistant', text: parsed?.message ?? res.content });
-    opts.onUpdate(session);
-    break;
+    if (stopTurn) break;
   }
 
   return session;
