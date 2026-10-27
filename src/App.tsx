@@ -28,7 +28,7 @@ import {
   type StoredMsg,
   type Workspace,
 } from './lib/store';
-import { loadMissions, saveMissions, missionKind, type Mission, type MissionKind } from './lib/missions';
+import { deleteMission, loadMissions, missionKind, saveMissions, updateMission, type Mission, type MissionKind } from './lib/missions';
 import { maybeSeedDemo } from './lib/demoSeed';
 import { Toaster } from './lib/toast';
 import PlaybookModal from './components/PlaybookModal';
@@ -71,6 +71,7 @@ function App() {
   const [missions, setMissions] = useState<Mission[]>(() => loadMissions());
   const [workspace, setWorkspace] = useState<Workspace>(loadWorkspace);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [editingMission, setEditingMission] = useState<Mission | null>(null);
   const [usage, setUsage] = useState<Usage>({ prompt: 0, completion: 0, total: 0, calls: 0 });
 
   const [sessions, setSessions] = useState<Session[]>(() => loadSessions());
@@ -171,13 +172,46 @@ function App() {
   }, [activeMission, connected]);
 
   const createMission = (mission: Mission) => {
-    setMissions((ms) => [mission, ...ms]);
+    setMissions((ms) => {
+      const exists = ms.find((m) => m.id === mission.id);
+      if (exists) {
+        const updated = updateMission(mission);
+        return updated ?? ms.map((m) => (m.id === mission.id ? mission : m));
+      }
+      const next = [mission, ...ms];
+      saveMissions(next);
+      return next;
+    });
     setActiveId(mission.id);
     // Ensure we land in the workspace matching the mission kind
     const w: Workspace = missionKind(mission) === 'bugbounty' ? 'bugbounty' : 'pentest';
     if (w !== workspace) {
       setWorkspace(w);
       localStorage.setItem(WORKSPACE_KEY, w);
+    }
+  };
+
+  const removeMission = (id: string) => {
+    if (!id) return;
+    const all = deleteMission(id);
+    setMissions(all);
+    if (activeId === id) {
+      const kind = workspace === 'bugbounty' ? 'bugbounty' : workspace === 'pentest' ? 'pentest' : null;
+      if (kind) {
+        const first = all.find((m) => missionKind(m) === kind);
+        setActiveId(first?.id ?? null);
+      } else {
+        setActiveId(null);
+      }
+    }
+    // Also clean up sessions for this mission
+    setSessions((prev) => {
+      const remaining = prev.filter((s) => s.missionId !== id);
+      saveSessions(remaining);
+      return remaining;
+    });
+    if (activeSessionId && sessions.find((s) => s.id === activeSessionId)?.missionId === id) {
+      setActiveSessionId(null);
     }
   };
 
@@ -340,34 +374,43 @@ function App() {
   const activeTaskCount = activeId ? tasks.filter((t) => t.missionId === activeId && t.enabled).length : 0;
 
   return (
-    <div className="h-screen w-screen bg-bg-primary text-text-primary flex flex-col overflow-hidden">
-      <TopBar
-        mission={activeMission}
+    <div className="h-screen w-screen bg-bg-primary text-text-primary flex overflow-hidden">
+      <Sidebar
         workspace={workspace}
-        connected={connected}
-        onConnectionChange={setConnected}
-        usage={{ total: usage.total, calls: usage.calls, cost }}
+        onWorkspaceChange={changeWorkspace}
+        missions={workspaceMissions}
+        activeId={activeId}
+        sessions={visibleSessions}
+        activeSessionId={activeSessionId}
+        taskCount={activeTaskCount}
+        runGroups={visibleRunGroups}
+        onNewMission={() => {
+          setEditingMission(null);
+          setMissionModalOpen(true);
+        }}
+        onSelect={setActiveId}
+        onNewSession={newSessionForMission}
+        onSelectSession={setActiveSessionId}
+        onDeleteSession={removeSession}
+        onEditMission={(m: Mission) => {
+          setEditingMission(m);
+          setMissionModalOpen(true);
+        }}
+        onDeleteMission={removeMission}
+        onOpenTasks={() => setTasksModalOpen(true)}
+        onOpenRunGroup={setCompareGroupId}
+        onOpenDashboard={() => setDashboardOpen(true)}
       />
-      <div className="flex-1 flex overflow-hidden">
-        <Sidebar
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        <TopBar
+          mission={activeMission}
           workspace={workspace}
-          onWorkspaceChange={changeWorkspace}
-          missions={workspaceMissions}
-          activeId={activeId}
-          sessions={visibleSessions}
-          activeSessionId={activeSessionId}
-          taskCount={activeTaskCount}
-          runGroups={visibleRunGroups}
-          onNewMission={() => setMissionModalOpen(true)}
-          onSelect={(id) => setActiveId(id)}
-          onNewSession={newSessionForMission}
-          onSelectSession={(id) => setActiveSessionId(id)}
-          onDeleteSession={removeSession}
-          onOpenTasks={() => setTasksModalOpen(true)}
-          onOpenRunGroup={(gid) => setCompareGroupId(gid)}
-          onOpenDashboard={() => setDashboardOpen(true)}
+          connected={connected}
+          onConnectionChange={setConnected}
+          usage={{ total: usage.total, calls: usage.calls, cost }}
         />
-        <MainPanel
+        <div className="flex-1 flex overflow-hidden">
+          <MainPanel
           mission={activeMission}
           session={activeSession}
           connected={connected}
@@ -391,20 +434,43 @@ function App() {
           onOpenMultiRun={() => setMultiRunOpen(true)}
           onOpenPlaybook={() => setPlaybookOpen(true)}
         />
-        {!intelCollapsed && (
+        {!intelCollapsed ? (
           <MissionIntel
             mission={activeMission}
             session={activeSession}
             connected={connected}
             onCollapse={() => setIntelCollapsed(true)}
           />
+        ) : (
+          <button
+            onClick={() => setIntelCollapsed(false)}
+            className="w-6 border-l border-border bg-bg-secondary hover:bg-bg-tertiary text-text-secondary hover:text-text-primary flex items-center justify-center"
+            title="Show Mission Intel"
+          >
+            ‹
+          </button>
         )}
       </div>
-      {!shellCollapsed && <ShellPanel onCollapse={() => setShellCollapsed(true)} />}
+      {!shellCollapsed ? (
+        <ShellPanel onCollapse={() => setShellCollapsed(true)} />
+      ) : (
+        <button
+          onClick={() => setShellCollapsed(false)}
+          className="h-6 border-t border-border bg-bg-secondary hover:bg-bg-tertiary text-text-secondary hover:text-text-primary flex items-center justify-center text-xs"
+          title="Show Shell"
+        >
+          ▲
+        </button>
+      )}
+      </div>
       {missionModalOpen && (
         <NewMissionModal
-          kind={kindOf(workspace) ?? 'pentest'}
-          onClose={() => setMissionModalOpen(false)}
+          kind={editingMission?.kind ?? (workspace === 'bugbounty' ? 'bugbounty' : 'pentest')}
+          mission={editingMission}
+          onClose={() => {
+            setMissionModalOpen(false);
+            setEditingMission(null);
+          }}
           onCreate={createMission}
         />
       )}

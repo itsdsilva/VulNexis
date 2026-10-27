@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
-// VulNexis premium design tokens — warm near-black, hairline borders,
-// Inter UI + IBM Plex Mono terminal, soft radii, restrained accents.
+// VulNexis design tokens — Notion-style neutral dark surfaces, hairline
+// borders, hover-revealed controls, Inter UI + IBM Plex Mono terminal.
 export default {
   content: [
     "./index.html",
@@ -10,25 +10,26 @@ export default {
     extend: {
       colors: {
         bg: {
-          primary: '#12100f',
-          secondary: '#181614',
-          tertiary: '#201d1a',
-          elevated: '#262220',
+          primary: '#191919',
+          secondary: '#1e1e1e',
+          tertiary: '#252525',
+          elevated: '#2a2a2a',
         },
-        border: '#34302c',
-        bordermuted: '#262220',
+        border: '#383838',
+        bordermuted: '#2d2d2d',
         text: {
-          primary: '#f0eeea',
-          secondary: '#bcb8b1',
-          muted: '#8a8580',
-          disabled: '#5c5854',
+          primary: '#e8e8e6',
+          secondary: '#a6a6a3',
+          muted: '#7d7d7a',
+          disabled: '#575754',
         },
         accent: {
-          cyan: '#56b4ff',
-          green: '#46c285',
-          amber: '#e8a33d',
-          red: '#e5655e',
+          cyan: '#4d9ff2',
+          green: '#53b483',
+          amber: '#d9a542',
+          red: '#e26f65',
           purple: '#a78bfa',
+          orange: '#f28b30',
         }
       },
       fontFamily: {
@@ -37,20 +38,20 @@ export default {
       },
       borderRadius: {
         none: '0',
-        sm: '4px',
-        DEFAULT: '8px',
-        md: '10px',
-        lg: '12px',
-        xl: '16px',
-        '2xl': '20px',
+        sm: '3px',
+        DEFAULT: '6px',
+        md: '8px',
+        lg: '10px',
+        xl: '12px',
+        '2xl': '16px',
       },
       boxShadow: {
-        card: '0 1px 2px rgba(0,0,0,0.25), 0 8px 24px rgba(0,0,0,0.18)',
-        pop: '0 4px 12px rgba(0,0,0,0.35), 0 24px 64px rgba(0,0,0,0.35)',
-        glow: '0 0 0 1px rgba(86,180,255,0.25), 0 0 24px rgba(86,180,255,0.12)',
+        card: '0 1px 2px rgba(0,0,0,0.30)',
+        pop: '0 4px 12px rgba(0,0,0,0.35), 0 20px 48px rgba(0,0,0,0.45)',
+        glow: '0 0 0 1px rgba(242,139,48,0.50), 0 0 0 3px rgba(242,139,48,0.12)',
       },
       letterSpacing: {
-        micro: '0.09em',
+        micro: '0.08em',
       },
     },
   },

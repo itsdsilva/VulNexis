@@ -1,9 +1,10 @@
-import { useState } from 'react';
-import { newMissionId, parseScopeText, type Intensity, type Mission, type MissionKind } from '../lib/missions';
+import { useEffect, useState } from 'react';
+import { newMissionId, parseScopeText, scopeToText, type Intensity, type Mission, type MissionKind } from '../lib/missions';
 import { importScopeFromText, scopeToForm } from '../lib/scopeImport';
 
 interface NewMissionModalProps {
   kind: MissionKind;
+  mission?: Mission | null;
   onClose: () => void;
   onCreate: (mission: Mission) => void;
 }
@@ -15,8 +16,9 @@ const INTENSITIES: { value: Intensity; label: string; hint: string }[] = [
   { value: 'aggressive', label: 'Aggressive', hint: 'Broader, faster scans — never destructive (replay N=5)' },
 ];
 
-export default function NewMissionModal({ kind, onClose, onCreate }: NewMissionModalProps) {
+export default function NewMissionModal({ kind, mission, onClose, onCreate }: NewMissionModalProps) {
   const isBB = kind === 'bugbounty';
+  const isEdit = !!mission;
   const [name, setName] = useState('');
   const [domains, setDomains] = useState('');
   const [ips, setIps] = useState('');
@@ -32,6 +34,39 @@ export default function NewMissionModal({ kind, onClose, onCreate }: NewMissionM
   const [policyText, setPolicyText] = useState('');
   const [importing, setImporting] = useState(false);
   const [importNote, setImportNote] = useState('');
+
+  useEffect(() => {
+    if (mission) {
+      const s = scopeToText(mission.scope);
+      setName(mission.name || '');
+      setDomains(s.domains);
+      setIps(s.ips);
+      setWildcards(s.wildcards);
+      setOutOfScope(s.outOfScope);
+      setIntensity(mission.intensity ?? 'normal');
+      setAuthorized(true);
+      setInScopeOnly(true);
+      setResponsible(true);
+      setLabOnly(true);
+      setError('');
+      setShowImport(false);
+      setImportNote('');
+    } else {
+      setName('');
+      setDomains('');
+      setIps('');
+      setWildcards('');
+      setOutOfScope('');
+      setIntensity('normal');
+      setAuthorized(false);
+      setInScopeOnly(false);
+      setResponsible(false);
+      setLabOnly(false);
+      setError('');
+      setShowImport(false);
+      setImportNote('');
+    }
+  }, [mission]);
 
   const allChecked = authorized && inScopeOnly && responsible && labOnly;
 
@@ -69,26 +104,26 @@ export default function NewMissionModal({ kind, onClose, onCreate }: NewMissionM
       setError('You must confirm all authorization statements.');
       return;
     }
-    const mission: Mission = {
-      id: newMissionId(),
+    const m: Mission = {
+      id: mission?.id ?? newMissionId(),
       name: name.trim(),
       scope,
       roeConfirmed: true,
-      createdAt: new Date().toISOString(),
-      status: 'active',
+      createdAt: mission?.createdAt ?? new Date().toISOString(),
+      status: mission?.status ?? 'active',
       intensity,
-      kind,
+      kind: mission?.kind ?? kind,
     };
-    onCreate(mission);
+    onCreate(m);
     onClose();
   };
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="w-[620px] max-h-[90vh] overflow-y-auto bg-bg-secondary border border-border rounded-lg">
-        <div className="h-10 border-b border-border flex items-center justify-between px-4">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="w-[620px] max-h-[90vh] overflow-y-auto bg-bg-elevated border border-border rounded-lg shadow-pop">
+        <div className="h-10 border-b border-bordermuted flex items-center justify-between px-4">
           <span className="text-sm font-semibold">
-            {isBB ? '🐞 New Bug Bounty Program' : '🎯 New Mission'}
+            {isEdit ? (isBB ? 'Edit Bug Bounty Program' : 'Edit Mission') : isBB ? 'New Bug Bounty Program' : 'New Mission'}
           </span>
           <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-base">×</button>
         </div>
@@ -235,7 +270,7 @@ export default function NewMissionModal({ kind, onClose, onCreate }: NewMissionM
               onClick={create}
               className="px-4 py-1.5 text-xs font-semibold bg-accent-cyan/15 text-accent-cyan border border-accent-cyan/40 rounded hover:bg-accent-cyan/25"
             >
-              {isBB ? 'Create Program' : 'Create Mission'}
+              {isEdit ? 'Save' : isBB ? 'Create Program' : 'Create Mission'}
             </button>
           </div>
         </div>

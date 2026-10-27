@@ -23,7 +23,7 @@ function inline(text: string, keyBase: string): ReactNode[] {
       );
     } else if (tok.startsWith('`')) {
       nodes.push(
-        <code key={key} className="px-1 py-0.5 rounded bg-black/40 text-[0.92em] font-mono text-accent-cyan">
+        <code key={key} className="px-1 py-0.5 rounded-sm bg-bg-tertiary text-[0.9em] font-mono text-text-primary/90">
           {tok.slice(1, -1)}
         </code>
       );
@@ -35,14 +35,14 @@ function inline(text: string, keyBase: string): ReactNode[] {
           href={mm?.[2]}
           target="_blank"
           rel="noreferrer noopener"
-          className="text-accent-cyan underline decoration-dotted"
+          className="text-accent-cyan hover:text-accent-cyan/80 underline underline-offset-2"
         >
           {mm?.[1]}
         </a>
       );
     } else {
       nodes.push(
-        <em key={key} className="italic">
+        <em key={key} className="italic text-text-primary/90">
           {tok.slice(1, -1)}
         </em>
       );
@@ -53,14 +53,77 @@ function inline(text: string, keyBase: string): ReactNode[] {
   return nodes;
 }
 
+function isTableSeparator(line: string): boolean {
+  const t = line.trim();
+  if (!t.includes('|')) return false;
+  // Must be mostly dashes, colons, spaces, pipes
+  const stripped = t.replace(/\|/g, '').replace(/:/g, '').replace(/-/g, '').replace(/\s/g, '');
+  return stripped.length === 0 && t.includes('-');
+}
+
+function parseTableRow(line: string): string[] {
+  let l = line.trim();
+  if (l.startsWith('|')) l = l.slice(1);
+  if (l.endsWith('|')) l = l.slice(0, -1);
+  // Simple split by | (sufficient for basic tables)
+  return l.split('|').map((c) => c.trim());
+}
+
 export default function Markdown({ text }: { text: string }) {
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  // Strip common internal tool traces that leak from some agents
+  let clean = text || '';
+  clean = clean.replace(/\[pasted-context-[^\]]+\]\s*/gi, '');
+  clean = clean.replace(/Called the Read tool[^\n]*/gi, '');
+  clean = clean.replace(/Called the .*? tool[^\n]*/gi, '');
+  clean = clean.replace(/Read tool with the following input[^\n]*/gi, '');
+  clean = clean.replace(/^\s*\{\s*"filePath"[\s\S]*?\}\s*$/gim, '');
+  const lines = clean.replace(/\r\n/g, '\n').split('\n');
   const blocks: ReactNode[] = [];
   let i = 0;
   let key = 0;
 
   while (i < lines.length) {
     const line = lines[i];
+
+    // Table detection
+    if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const headerCells = parseTableRow(line);
+      i += 2; // skip header and separator
+      const rows: string[][] = [];
+      while (i < lines.length && lines[i].includes('|') && !isTableSeparator(lines[i]) && lines[i].trim() !== '') {
+        // Stop if it's a new block type
+        if (/^#{1,6}\s+/.test(lines[i].trim()) || /^\s*```/.test(lines[i].trim())) break;
+        rows.push(parseTableRow(lines[i]));
+        i++;
+      }
+      blocks.push(
+        <div key={`b${key++}`} className="my-3 overflow-x-auto rounded-lg border border-bordermuted">
+          <table className="w-full text-xs border-collapse">
+            <thead>
+              <tr className="border-b border-border bg-bg-tertiary/50">
+                {headerCells.map((cell, ci) => (
+                  <th key={ci} className="text-left px-3 py-2 text-text-primary font-medium">
+                    {inline(cell, `t${key}-h${ci}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, ri) => (
+                <tr key={ri} className="border-b border-bordermuted hover:bg-bg-tertiary/40 transition-colors">
+                  {row.map((cell, ci) => (
+                    <td key={ci} className="px-3 py-2 align-top text-text-secondary leading-relaxed">
+                      {inline(cell, `t${key}-r${ri}-${ci}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
 
     if (/^```/.test(line.trim())) {
       const buf: string[] = [];
@@ -73,9 +136,9 @@ export default function Markdown({ text }: { text: string }) {
       blocks.push(
         <pre
           key={`b${key++}`}
-          className="my-2 rounded border border-border bg-black/60 p-2 overflow-x-auto text-[11px] font-mono leading-relaxed"
+          className="my-3 rounded-lg border border-bordermuted bg-bg-tertiary p-3 overflow-x-auto text-[11px] font-mono leading-relaxed"
         >
-          <code>{buf.join('\n')}</code>
+          <code className="text-text-secondary">{buf.join('\n')}</code>
         </pre>
       );
       continue;
@@ -84,11 +147,11 @@ export default function Markdown({ text }: { text: string }) {
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       const level = heading[1].length;
-      const sizes = ['text-base', 'text-sm', 'text-sm', 'text-xs', 'text-xs', 'text-xs'];
+      const sizes = ['text-base', 'text-sm', 'text-[13px]', 'text-xs', 'text-xs', 'text-xs'];
       blocks.push(
         <div
           key={`b${key++}`}
-          className={`mt-3 mb-1 font-semibold ${sizes[level - 1]} ${level <= 2 ? 'text-text-primary' : 'text-text-secondary'}`}
+          className={`mt-4 mb-2 font-semibold tracking-tight ${sizes[level - 1]} ${level === 1 ? 'text-text-primary text-base border-b border-bordermuted pb-1' : level === 2 ? 'text-text-primary' : 'text-text-primary/90'}`}
         >
           {inline(heading[2], `b${key}`)}
         </div>
@@ -98,7 +161,7 @@ export default function Markdown({ text }: { text: string }) {
     }
 
     if (/^\s*([-*_])\s*\1\s*\1[\s-*_]*$/.test(line)) {
-      blocks.push(<hr key={`b${key++}`} className="my-3 border-border" />);
+      blocks.push(<hr key={`b${key++}`} className="my-3 border-bordermuted" />);
       i++;
       continue;
     }
@@ -125,10 +188,12 @@ export default function Markdown({ text }: { text: string }) {
       blocks.push(
         <Tag
           key={`b${key++}`}
-          className={`my-1.5 ml-4 space-y-0.5 ${ordered ? 'list-decimal' : 'list-disc'} marker:text-text-secondary`}
+          className={`my-2 ml-5 space-y-1 ${ordered ? 'list-decimal' : 'list-disc'} marker:text-text-disabled`}
         >
           {items.map((it, n) => (
-            <li key={n}>{inline(it, `b${key}-${n}`)}</li>
+            <li key={n} className="pl-1 leading-relaxed text-text-secondary">
+              {inline(it, `b${key}-${n}`)}
+            </li>
           ))}
         </Tag>
       );
@@ -144,7 +209,7 @@ export default function Markdown({ text }: { text: string }) {
       blocks.push(
         <blockquote
           key={`b${key++}`}
-          className="my-2 border-l-2 border-accent-cyan/40 pl-2 text-text-secondary"
+          className="my-2 border-l-2 border-border pl-2.5 text-text-secondary"
         >
           {inline(buf.join(' '), `b${key}`)}
         </blockquote>

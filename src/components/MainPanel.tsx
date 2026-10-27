@@ -1,7 +1,7 @@
 ﻿import { useEffect, useRef, useState } from 'react';
 import Markdown from './Markdown';
 import type { Mission } from '../lib/missions';
-import { forkSession, type GoalState, type PermissionMode, type Session, type SessionGoal } from '../lib/store';
+import { forkSession, type GoalState, type PermissionMode, type Session, type SessionGoal, type StoredMsg } from '../lib/store';
 import { saveLLMSettings, loadLLMSettings, loadModelPrefs, rememberRecentModel, toggleFavoriteModel, PROVIDERS, type LLMSettings, type ModelPrefs } from '../lib/llm';
 import { WORKFLOWS, runWorkflow } from '../lib/workflows';
 import { runTurn, runGoalLoop } from '../lib/agent';
@@ -24,12 +24,12 @@ interface MainPanelProps {
 }
 
 const agentBadge: Record<string, string> = {
-  pentest: 'bg-accent-cyan/10 text-accent-cyan',
-  recon: 'bg-accent-green/10 text-accent-green',
-  web: 'bg-accent-purple/10 text-accent-purple',
-  privesc: 'bg-accent-amber/10 text-accent-amber',
-  expl: 'bg-accent-red/10 text-accent-red',
-  replan: 'bg-accent-purple/10 text-accent-purple',
+  pentest: 'text-accent-cyan',
+  recon: 'text-accent-green',
+  web: 'text-accent-purple',
+  privesc: 'text-accent-amber',
+  expl: 'text-accent-red',
+  replan: 'text-accent-purple',
 };
 
 const GOAL_TERMINAL: GoalState[] = ['complete', 'blocked', 'budget'];
@@ -42,19 +42,27 @@ const goalStateStyle: Record<GoalState, { dot: string; chip: string; label: stri
   budget: { dot: 'text-accent-red', chip: 'border-accent-red/40 text-accent-red', label: 'budget reached' },
 };
 
-function roleStyle(role: string) {
-  switch (role) {
-    case 'user':
-      return 'border-accent-cyan/20 bg-accent-cyan/[0.06]';
-    case 'assistant':
-      return 'border-bordermuted bg-bg-secondary';
-    case 'tool':
-      return 'border-bordermuted bg-bg-tertiary/70 font-mono text-xs';
-    case 'error':
-      return 'border-accent-red/30 bg-accent-red/[0.06] text-accent-red';
-    default:
-      return 'border-bordermuted bg-bg-secondary';
-  }
+/** ShipChamber-style collapsible tool block — collapsed by default. */
+function ToolBlock({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const firstLine = (text || '').split('\n').find((l) => l.trim()) ?? 'output';
+  return (
+    <div className="rounded-lg border border-bordermuted bg-bg-secondary overflow-hidden">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-text-muted hover:text-text-secondary hover:bg-bg-tertiary/50 transition-colors"
+      >
+        <span className={`inline-block transition-transform duration-150 ${open ? 'rotate-90' : ''}`}>▸</span>
+        <span className="font-medium">tool output</span>
+        <span className="truncate flex-1 text-left font-mono opacity-60">{firstLine}</span>
+      </button>
+      {open && (
+        <pre className="px-3 py-2 text-[11px] font-mono text-text-secondary leading-relaxed border-t border-bordermuted overflow-x-auto whitespace-pre-wrap break-words">
+          {text}
+        </pre>
+      )}
+    </div>
+  );
 }
 
 interface GoalForm {
@@ -66,6 +74,33 @@ interface GoalForm {
 
 function formOf(goal: SessionGoal): GoalForm {
   return { title: goal.title, criteria: goal.criteria, maxTurns: goal.maxTurns, budget: goal.budget };
+}
+
+function Message({ m }: { m: StoredMsg }) {
+  if (m.role === 'tool') return <ToolBlock text={m.text} />;
+  if (m.role === 'error') {
+    return (
+      <div className="border-l-2 border-accent-red/60 pl-3 text-xs text-accent-red whitespace-pre-wrap break-words">
+        <div className="micro-label !text-accent-red/70 mb-1">error</div>
+        {m.text}
+      </div>
+    );
+  }
+  if (m.role === 'user') {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%] w-fit bg-accent-orange/15 border border-accent-orange/25 rounded-xl px-3.5 py-2.5 text-sm whitespace-pre-wrap break-words text-text-primary">
+          {m.text}
+        </div>
+      </div>
+    );
+  }
+  // assistant — Notion doc feel: plain text, no box
+  return (
+    <div className="text-sm">
+      <Markdown text={m.text} />
+    </div>
+  );
 }
 
 export default function MainPanel({
@@ -96,6 +131,17 @@ export default function MainPanel({
   const [goalDialog, setGoalDialog] = useState(false);
   const [goalArmed, setGoalArmed] = useState(false);
   const [goalForm, setGoalForm] = useState<GoalForm>({ title: '', criteria: '', maxTurns: 8, budget: 0 });
+  const [listening, setListening] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
+  const recRef = useRef<any>(null);
+  const wantListeningRef = useRef(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Anchor for cursor insertion: text before/after the caret when dictation started
+  const anchorRef = useRef<{ before: string; after: string }>({ before: '', after: '' });
+  const sessionFinalRef = useRef('');
+  const caretRef = useRef<number | null>(null);
+  const pendingCaretRef = useRef(false);
+  const errCountRef = useRef(0);
   const pauseRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -295,13 +341,126 @@ export default function MainPanel({
 
   const providerInfo = PROVIDERS[llm.provider];
 
+  // Restore the caret to the dictation insertion point after each
+  // recognition-driven input update (so typing and dictation interleave).
+  useEffect(() => {
+    if (pendingCaretRef.current && textareaRef.current && caretRef.current !== null) {
+      const pos = Math.min(caretRef.current, textareaRef.current.value.length);
+      textareaRef.current.selectionStart = pos;
+      textareaRef.current.selectionEnd = pos;
+      pendingCaretRef.current = false;
+    }
+  }, [input]);
+
+  /**
+   * Voice input — Web Speech API with pause resilience:
+   * - `continuous` + auto-restart in onend keeps the session alive through
+   *   long silences (many engines auto-stop after a few seconds of quiet).
+   * - Final chunks accumulate across restarts; interim text is re-rendered
+   *   live.
+   * - Transcript is inserted at the caret captured at dictation start, not
+   *   appended to the end, and the caret is restored after every update.
+   */
+  const toggleMic = () => {
+    if (listening) {
+      // Stop: keep applying any final chunk that flushes, then clean up in onend
+      wantListeningRef.current = false;
+      recRef.current?.stop();
+      return;
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) {
+      window.alert('Voice input is not supported in this environment.');
+      return;
+    }
+    const ta = textareaRef.current;
+    const value = ta ? ta.value : input;
+    const selStart = ta ? (ta.selectionStart ?? value.length) : value.length;
+    const selEnd = ta ? (ta.selectionEnd ?? selStart) : value.length;
+    anchorRef.current = { before: value.slice(0, selStart), after: value.slice(selEnd) };
+    sessionFinalRef.current = '';
+    errCountRef.current = 0;
+    wantListeningRef.current = true;
+    try {
+      const rec = new SR();
+      recRef.current = rec;
+      rec.lang = navigator.language || 'en-US';
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (e: any) => {
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          const t = r[0].transcript;
+          if (r.isFinal) {
+            const prev = sessionFinalRef.current;
+            sessionFinalRef.current = prev && !prev.endsWith(' ') ? prev + ' ' + t.trim() : prev + t.trim();
+          } else {
+            interim += t;
+          }
+        }
+        const chunk =
+          sessionFinalRef.current + (interim ? (sessionFinalRef.current ? ' ' : '') + interim : '');
+        const { before, after } = anchorRef.current;
+        caretRef.current = before.length + chunk.length;
+        pendingCaretRef.current = true;
+        setInput(before + chunk + after);
+      };
+      rec.onend = () => {
+        // Long pause: engine ended on its own — restart while the user still wants dictation
+        if (wantListeningRef.current) {
+          window.setTimeout(() => {
+            if (!wantListeningRef.current) return;
+            try {
+              rec.start();
+            } catch {
+              // already starting; onend will retry
+            }
+          }, 250);
+        } else {
+          setListening(false);
+          recRef.current = null;
+        }
+      };
+      rec.onerror = (e: any) => {
+        const err = e?.error;
+        if (err === 'not-allowed' || err === 'service-not-allowed' || err === 'audio-capture') {
+          // Hard failure — stop trying, tell the user
+          wantListeningRef.current = false;
+          setListening(false);
+          recRef.current = null;
+          window.alert('Microphone unavailable or permission denied.');
+          return;
+        }
+        // no-speech / aborted / network blips: onend decides whether to restart.
+        // Guard against endless restart loops on persistent failures.
+        errCountRef.current++;
+        if (errCountRef.current > 8) {
+          wantListeningRef.current = false;
+          setListening(false);
+          recRef.current = null;
+        }
+      };
+      rec.start();
+      setListening(true);
+    } catch {
+      wantListeningRef.current = false;
+      setListening(false);
+      recRef.current = null;
+    }
+  };
+
   return (
-    <div className="flex-1 flex flex-col min-w-0">
-      {/* Session header */}
-      <div className="h-11 border-b border-bordermuted flex items-center px-4 gap-2 shrink-0 bg-bg-secondary/50">
-        <span className="text-sm font-medium truncate">{session?.name ?? 'New chat'}</span>
+    <div className="flex-1 flex flex-col min-w-0 bg-bg-primary">
+      {/* Session header — blends with the canvas; hairline appears only when scrolled */}
+      <div
+        className={`h-11 flex items-center px-3.5 gap-2 shrink-0 bg-bg-primary ${
+          scrolled ? 'border-b border-bordermuted' : 'border-b border-transparent'
+        }`}
+      >
+        <span className="text-[13px] font-medium truncate">{session?.name ?? 'New chat'}</span>
         {session && session.agent !== 'recon' && (
-          <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${agentBadge[session.agent] ?? 'bg-bg-tertiary text-text-secondary border border-bordermuted'}`}>
+          <span className={`text-[11px] font-medium ${agentBadge[session.agent] ?? 'text-text-muted'}`}>
             {session.agent}
           </span>
         )}
@@ -318,7 +477,7 @@ export default function MainPanel({
         {session && (
           <button
             onClick={() => onFork(forkSession(session))}
-            className="text-xs text-text-secondary hover:text-accent-purple px-2 py-1 rounded-full hover:bg-bg-tertiary"
+            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
             title="Fork this session — copy history into a new session"
           >
             fork
@@ -327,7 +486,7 @@ export default function MainPanel({
         {mission && (
           <button
             onClick={onOpenMultiRun}
-            className="text-xs text-text-secondary hover:text-accent-purple px-2 py-1 rounded-full hover:bg-bg-tertiary"
+            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
             title="Run the same prompt across several parallel sessions"
           >
             multi-run
@@ -336,7 +495,7 @@ export default function MainPanel({
         {mission && (
           <button
             onClick={onOpenPlaybook}
-            className="text-xs text-text-secondary hover:text-accent-purple px-2 py-1 rounded-full hover:bg-bg-tertiary"
+            className="text-xs text-text-secondary hover:text-text-primary px-2 py-1 rounded-md hover:bg-bg-tertiary"
             title="Run a pentest-ai playbook — phase-by-phase with manual gates"
           >
             playbook
@@ -347,7 +506,7 @@ export default function MainPanel({
             <select
               value={permission}
               onChange={(e) => onPermissionChange(e.target.value as PermissionMode)}
-              className="bg-bg-tertiary border border-bordermuted rounded-full px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary cursor-pointer"
+              className="bg-bg-tertiary border border-bordermuted rounded-md px-2 py-1 text-[11px] text-text-secondary hover:text-text-primary cursor-pointer"
             >
               <option value="ask">ask every command</option>
               <option value="auto-low">auto-run low risk</option>
@@ -355,7 +514,7 @@ export default function MainPanel({
             </select>
             <button
               onClick={() => setShowSettings((v) => !v)}
-              className={`text-[11px] px-2 py-1 rounded-full border ${showSettings ? 'border-border text-text-primary bg-bg-tertiary' : 'border-bordermuted text-text-secondary hover:text-text-primary'}`}
+              className={`text-[11px] px-2 py-1 rounded-md ${showSettings ? 'bg-bg-tertiary text-text-primary' : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'}`}
               title="Token budget settings"
             >
               budget
@@ -365,7 +524,7 @@ export default function MainPanel({
       </div>
 
       {mission && showSettings && (
-        <div className="border-b border-bordermuted bg-bg-secondary/70 px-4 py-3 flex items-center gap-3 text-xs shrink-0">
+        <div className="border-b border-bordermuted bg-bg-secondary/60 px-4 py-2.5 flex items-center gap-3 text-xs shrink-0">
           <label className="text-text-secondary">Auto-stop after:</label>
           <input
             type="number"
@@ -389,9 +548,9 @@ export default function MainPanel({
 
       {/* Goal strip */}
       {goal && (
-        <div className="border-b border-bordermuted bg-bg-secondary/70 px-4 py-2 flex items-center gap-2 text-xs shrink-0">
+        <div className="border-b border-bordermuted bg-bg-secondary/60 px-4 py-2 flex items-center gap-2 text-xs shrink-0">
           <span className={goalStateStyle[goal.state].dot}>◎</span>
-          <span className={`text-[10px] px-2 py-0.5 rounded-full border font-medium ${goalStateStyle[goal.state].chip}`}>
+          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${goalStateStyle[goal.state].chip}`}>
             {goalStateStyle[goal.state].label}
           </span>
           <span className="font-medium truncate max-w-[180px]" title={goal.title}>
@@ -409,7 +568,7 @@ export default function MainPanel({
           {goalActive && (
             <button
               onClick={pauseGoal}
-              className="text-text-secondary hover:text-text-primary px-1.5 py-0.5 rounded hover:bg-bg-tertiary"
+              className="text-text-secondary hover:text-text-primary px-1.5 py-0.5 rounded-md hover:bg-bg-tertiary"
               title="Pause the goal loop and stop after the current turn"
             >
               pause
@@ -419,38 +578,34 @@ export default function MainPanel({
             <button
               onClick={resumeGoal}
               disabled={busy}
-              className="text-accent-cyan hover:text-accent-cyan/80 px-1.5 py-0.5 rounded hover:bg-bg-tertiary disabled:opacity-40"
+              className="text-accent-cyan hover:text-accent-cyan/80 px-1.5 py-0.5 rounded-md hover:bg-bg-tertiary disabled:opacity-40"
               title="Resume — re-run the goal loop now"
             >
               resume
             </button>
           )}
-          <button onClick={openGoalDialog} className="text-text-secondary hover:text-text-primary px-1.5 py-0.5 rounded hover:bg-bg-tertiary" title="Edit, remove or review the goal">
+          <button onClick={openGoalDialog} className="text-text-secondary hover:text-text-primary px-1.5 py-0.5 rounded-md hover:bg-bg-tertiary" title="Edit, remove or review the goal">
             edit
           </button>
         </div>
       )}
 
-      {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5">
+      {/* Messages — unboxed conversation, Notion doc typography */}
+      <div
+        ref={scrollRef}
+        onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 4)}
+        className="flex-1 overflow-y-auto px-4 py-5"
+      >
         <div className="max-w-3xl mx-auto space-y-3">
           {session?.messages.length === 0 && (
-            <div className="text-text-muted text-sm italic px-2 pt-8 text-center">
+            <div className="text-text-muted text-sm px-2 pt-8 text-center">
               {mission
                 ? `Mission "${mission.name}" is active. Describe what you want to test, paste scan output, or ask for a plan.`
                 : 'Ask anything — this is a plain AI chat. Create a mission to let the agent run tools on your Kali VM.'}
             </div>
           )}
           {session?.messages.map((m, i) => (
-            <div key={i} className={`border rounded-xl px-4 py-3 text-sm shadow-card ${roleStyle(m.role)}`}>
-              {m.role === 'tool' && <div className="text-[9px] text-accent-green/80 mb-1.5 micro-label !text-accent-green/70">tool output</div>}
-              {m.role === 'error' && <div className="text-[9px] text-accent-red/80 mb-1.5 micro-label !text-accent-red/70">error</div>}
-              {m.role === 'assistant' ? (
-                <Markdown text={m.text} />
-              ) : (
-                <div className="whitespace-pre-wrap break-words">{m.text}</div>
-              )}
-            </div>
+            <Message key={i} m={m} />
           ))}
           {busy && phase === 'turn' && <div className="text-text-muted text-sm italic px-2 animate-pulse">thinking…</div>}
           {busy && phase === 'eval' && (
@@ -459,115 +614,142 @@ export default function MainPanel({
         </div>
       </div>
 
-      {/* Composer */}
-      <div className="p-3 border-t border-bordermuted shrink-0 relative bg-bg-secondary/40">
-        {mission && (
-          <div className="flex items-center gap-2 pb-2 text-xs">
-            <span className="micro-label">workflows</span>
-            {WORKFLOWS.map((w) => (
-              <button
-                key={w.id}
-                onClick={() => runWorkflowById(w.id)}
-                disabled={!connected || busy}
-                title={w.description}
-                className="px-2.5 py-1 rounded-full border border-bordermuted bg-bg-tertiary/60 text-[11px] text-text-secondary hover:text-accent-cyan hover:border-accent-cyan/40 disabled:opacity-40"
-              >
-                {w.name}
-              </button>
-            ))}
-          </div>
-        )}
-        {goalArmed && (
-          <div className="flex items-center gap-2 pb-2 text-xs">
-            <span className="text-accent-amber">◎ goal armed</span>
-            <span className="text-text-muted">your next message becomes the goal objective</span>
-            <button onClick={() => setGoalArmed(false)} className="text-text-secondary hover:text-text-primary">
-              cancel
-            </button>
-          </div>
-        )}
-        <div className="card !bg-bg-tertiary/80 flex items-end gap-2 px-3 py-2 focus-within:border-accent-cyan/40 focus-within:shadow-glow transition-all">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            placeholder={
-              mission
-                ? connected
-                  ? 'Describe the objective, paste output, or give feedback…'
-                  : 'Chat freely — connect to Kali in Settings to run commands…'
-                : 'Ask anything…'
-            }
-            disabled={busy}
-            rows={2}
-            className="flex-1 bg-transparent border-0 px-0 py-1 text-sm resize-none focus:outline-none focus:ring-0 disabled:opacity-50 placeholder:text-text-disabled"
-          />
-          <button
-            onClick={send}
-            disabled={busy || !input.trim()}
-            className="px-4 py-1.5 btn-primary text-xs self-end disabled:!opacity-40"
-          >
-            Send
-          </button>
-        </div>
-        {/* Model picker — in the composer */}
-        <div className="flex items-center gap-2 pt-2 text-xs">
-          <button
-            onClick={toggleModelOpen}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-bordermuted bg-bg-tertiary/60 text-text-secondary hover:text-text-primary hover:border-border"
-          >
-            <span className="text-text-muted">model:</span>
-            <span className="text-text-primary font-mono text-[11px]">{llm.model}</span>
-            <span className="text-text-muted">{modelOpen ? '▴' : '▾'}</span>
-          </button>
-          {/* Goal target button: armed amber, blue while running, green complete, red blocked */}
-          <button
-            onClick={() => {
-              if (goal) openGoalDialog();
-              else {
-                setGoalForm({ title: '', criteria: '', maxTurns: 8, budget: 0 });
-                setGoalDialog(true);
-              }
-            }}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-full border bg-bg-tertiary/60 ${
-              goalActive
-                ? 'border-accent-cyan/50 text-accent-cyan'
-                : goal?.state === 'complete'
-                  ? 'border-accent-green/50 text-accent-green'
-                  : goal?.state === 'blocked' || goal?.state === 'budget'
-                    ? 'border-accent-red/50 text-accent-red'
-                    : goalArmed
-                      ? 'border-accent-amber/50 text-accent-amber'
-                      : 'border-bordermuted text-text-secondary hover:text-text-primary hover:border-border'
-            }`}
-            title={goal ? 'Goal settings' : 'Set a goal — the agent keeps working toward it automatically'}
-          >
-            <span>◎</span>
-            <span>{goal ? 'goal' : 'set goal'}</span>
-          </button>
-          {!mission && (
-            <button
-              onClick={onNewMission}
-              className="px-2.5 py-1 rounded-full border border-bordermuted bg-bg-tertiary/60 text-text-secondary hover:text-accent-cyan hover:border-accent-cyan/40"
-            >
-              + new mission
-            </button>
+      {/* Composer — ShipChamber style: bordered card, circular send */}
+      <div className="px-4 pb-3 pt-1 shrink-0 relative bg-bg-primary">
+        <div className="max-w-3xl mx-auto">
+          {mission && (
+            <div className="flex items-center gap-1 pb-1.5 text-xs flex-wrap">
+              <span className="micro-label mr-1">workflows</span>
+              {WORKFLOWS.map((w) => (
+                <button
+                  key={w.id}
+                  onClick={() => runWorkflowById(w.id)}
+                  disabled={!connected || busy}
+                  title={w.description}
+                  className="px-2 py-1 rounded-md text-[11px] text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:opacity-40 disabled:hover:bg-transparent"
+                >
+                  {w.name}
+                </button>
+              ))}
+            </div>
           )}
+          {goalArmed && (
+            <div className="flex items-center gap-2 pb-1.5 text-xs">
+              <span className="text-accent-amber">◎ goal armed</span>
+              <span className="text-text-muted">your next message becomes the goal objective</span>
+              <button onClick={() => setGoalArmed(false)} className="text-text-secondary hover:text-text-primary">
+                cancel
+              </button>
+            </div>
+          )}
+          <div className="rounded-xl border border-border bg-bg-secondary px-3 py-2 focus-within:border-accent-orange/60 focus-within:shadow-glow transition-all">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              placeholder={
+                mission
+                  ? connected
+                    ? 'Describe the objective, paste output, or give feedback…'
+                    : 'Chat freely — connect to Kali in Settings to run commands…'
+                  : 'Ask anything…'
+              }
+              disabled={busy}
+              rows={2}
+              className="flex-1 w-full bg-transparent border-0 px-0 py-0.5 text-sm resize-none focus:outline-none focus:ring-0 disabled:opacity-50 placeholder:text-text-disabled"
+            />
+            <div className="flex items-end justify-between mt-0.5">
+              <span className="text-[10px] text-text-disabled pl-0.5">
+                {listening ? 'listening…' : 'Enter to send · Shift+Enter for a new line'}
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={toggleMic}
+                  disabled={busy}
+                  className={`w-7 h-7 rounded-full flex items-center justify-center border transition-colors disabled:opacity-30 ${
+                    listening
+                      ? 'bg-accent-orange/15 text-accent-orange border-accent-orange/60 animate-pulse'
+                      : 'border-bordermuted text-text-secondary hover:text-text-primary hover:border-border'
+                  }`}
+                  title={listening ? 'Stop voice input' : 'Voice input'}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="9" y="2" width="6" height="12" rx="3" />
+                    <path d="M5 10a7 7 0 0 0 14 0" />
+                    <line x1="12" y1="19" x2="12" y2="22" />
+                  </svg>
+                </button>
+                <button
+                  onClick={send}
+                  disabled={busy || !input.trim()}
+                  className="w-7 h-7 rounded-full btn-primary flex items-center justify-center text-sm leading-none disabled:!opacity-30"
+                  title="Send"
+                >
+                  ↑
+                </button>
+              </div>
+            </div>
+          </div>
+          {/* Model picker + goal — ghost row under the composer */}
+          <div className="flex items-center gap-1 pt-1.5 text-xs">
+            <button
+              onClick={toggleModelOpen}
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+            >
+              <span className="text-text-muted">model:</span>
+              <span className="text-text-primary font-mono text-[11px]">{llm.model}</span>
+              <span className="text-text-muted">{modelOpen ? '▴' : '▾'}</span>
+            </button>
+            {/* Goal target button: armed amber, blue while running, green complete, red blocked */}
+            <button
+              onClick={() => {
+                if (goal) openGoalDialog();
+                else {
+                  setGoalForm({ title: '', criteria: '', maxTurns: 8, budget: 0 });
+                  setGoalDialog(true);
+                }
+              }}
+              className={`flex items-center gap-1 px-2 py-1 rounded-md ${
+                goalActive
+                  ? 'text-accent-cyan'
+                  : goal?.state === 'complete'
+                    ? 'text-accent-green'
+                    : goal?.state === 'blocked' || goal?.state === 'budget'
+                      ? 'text-accent-red'
+                      : goalArmed
+                        ? 'text-accent-amber'
+                        : 'text-text-secondary hover:bg-bg-tertiary hover:text-text-primary'
+              }`}
+              title={goal ? 'Goal settings' : 'Set a goal — the agent keeps working toward it automatically'}
+            >
+              <span>◎</span>
+              <span>{goal ? 'goal' : 'set goal'}</span>
+            </button>
+            {!mission && (
+              <button
+                onClick={onNewMission}
+                className="px-2 py-1 rounded-md text-text-secondary hover:bg-bg-tertiary hover:text-text-primary"
+              >
+                + new mission
+              </button>
+            )}
+          </div>
         </div>
 
         {modelOpen && (
-          <div className="absolute bottom-full left-3 right-3 mb-2 bg-bg-secondary border border-bordermuted rounded-xl shadow-pop z-40 max-h-80 overflow-y-auto">
+          <div className="absolute bottom-full left-4 right-4 mb-2 bg-bg-elevated border border-border rounded-lg shadow-pop z-40 max-h-80 overflow-y-auto">
             <div className="p-3 space-y-3">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="micro-label w-16">favorites</span>
                 {prefs.favorites.length === 0 && <span className="text-[11px] text-text-disabled">none yet — star a model below</span>}
                 {prefs.favorites.map((m) => (
-                  <span key={m} className="flex items-center gap-1 px-2 py-0.5 rounded-full border border-accent-amber/30 bg-accent-amber/10 text-[11px] text-accent-amber">
+                  <span key={m} className="flex items-center gap-1 px-2 py-0.5 rounded border border-accent-amber/30 bg-accent-amber/10 text-[11px] text-accent-amber">
                     <button onClick={() => pickModel(m)} className="font-mono">★ {m}</button>
                     <button onClick={() => setPrefs(toggleFavoriteModel(m))} className="opacity-60 hover:opacity-100">×</button>
                   </span>
@@ -577,7 +759,7 @@ export default function MainPanel({
                 <span className="micro-label w-16">recent</span>
                 {prefs.recents.length === 0 && <span className="text-[11px] text-text-disabled">none yet</span>}
                 {prefs.recents.map((m) => (
-                  <button key={m} onClick={() => pickModel(m)} className="px-2.5 py-1 rounded-full border border-bordermuted bg-bg-tertiary/60 text-[11px] font-mono text-text-secondary hover:text-text-primary hover:border-border">
+                  <button key={m} onClick={() => pickModel(m)} className="px-2 py-1 rounded-md bg-bg-tertiary text-[11px] font-mono text-text-secondary hover:text-text-primary">
                     {m}
                   </button>
                 ))}
@@ -616,9 +798,9 @@ export default function MainPanel({
 
         {/* Goal dialog */}
         {goalDialog && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50" onClick={() => setGoalDialog(false)}>
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setGoalDialog(false)}>
             <div
-              className="bg-bg-secondary border border-bordermuted rounded-xl shadow-pop w-[480px] max-h-[85vh] flex flex-col"
+              className="bg-bg-elevated border border-border rounded-xl shadow-pop w-[480px] max-h-[85vh] flex flex-col"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="h-11 border-b border-bordermuted flex items-center px-4">
@@ -636,7 +818,7 @@ export default function MainPanel({
                     onChange={(e) => setGoalForm((f) => ({ ...f, title: e.target.value }))}
                     disabled={!!goal && GOAL_TERMINAL.includes(goal.state)}
                     placeholder="e.g. Map the web attack surface"
-                    className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-sm"
+                    className="w-full bg-bg-tertiary border border-bordermuted rounded-md px-2 py-1.5 text-sm focus:border-accent-cyan/50"
                   />
                 </div>
                 <div>
@@ -647,7 +829,7 @@ export default function MainPanel({
                     disabled={!!goal && GOAL_TERMINAL.includes(goal.state)}
                     rows={4}
                     placeholder="Describe the finished state so an auditor without chat history can verify it. e.g. Enumerate subdomains and open ports for all in-scope targets, then summarize findings with evidence."
-                    className="w-full bg-bg-tertiary border border-border rounded px-2 py-1.5 text-sm resize-none"
+                    className="w-full bg-bg-tertiary border border-bordermuted rounded-md px-2 py-1.5 text-sm resize-none focus:border-accent-cyan/50"
                   />
                 </div>
                 <div className="flex gap-4">
@@ -660,7 +842,7 @@ export default function MainPanel({
                       value={goalForm.maxTurns}
                       onChange={(e) => setGoalForm((f) => ({ ...f, maxTurns: Number(e.target.value) || 8 }))}
                       disabled={!!goal && GOAL_TERMINAL.includes(goal.state)}
-                      className="w-24 bg-bg-tertiary border border-border rounded px-2 py-1.5 text-sm"
+                      className="w-24 bg-bg-tertiary border border-bordermuted rounded-md px-2 py-1.5 text-sm focus:border-accent-cyan/50"
                     />
                   </div>
                   <div>
@@ -672,12 +854,12 @@ export default function MainPanel({
                       value={goalForm.budget}
                       onChange={(e) => setGoalForm((f) => ({ ...f, budget: Number(e.target.value) || 0 }))}
                       disabled={!!goal && GOAL_TERMINAL.includes(goal.state)}
-                      className="w-32 bg-bg-tertiary border border-border rounded px-2 py-1.5 text-sm"
+                      className="w-32 bg-bg-tertiary border border-bordermuted rounded-md px-2 py-1.5 text-sm focus:border-accent-cyan/50"
                     />
                   </div>
                 </div>
                 {goal && (
-                  <div className="text-[10px] text-text-muted border border-border rounded px-2 py-1.5">
+                  <div className="text-[10px] text-text-muted border border-bordermuted rounded-md px-2 py-1.5">
                     state: {goal.state} · turns used: {goal.turns}/{goal.maxTurns}
                     {goal.note ? ` · last note: ${goal.note}` : ''}
                     {GOAL_TERMINAL.includes(goal.state) && ' · finished — read-only'}
@@ -690,7 +872,7 @@ export default function MainPanel({
                     <button
                       onClick={startGoalNow}
                       disabled={!goalForm.criteria.trim() || busy}
-                      className="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/40 rounded text-sm hover:bg-accent-cyan/30 disabled:opacity-40"
+                      className="px-3 py-1.5 btn-primary text-sm disabled:opacity-40"
                     >
                       Start now
                     </button>
@@ -699,7 +881,7 @@ export default function MainPanel({
                         setGoalArmed(true);
                         setGoalDialog(false);
                       }}
-                      className="px-3 py-1.5 border border-accent-amber/40 text-accent-amber rounded text-sm hover:bg-accent-amber/10"
+                      className="px-3 py-1.5 border border-accent-amber/40 text-accent-amber rounded-md text-sm hover:bg-accent-amber/10"
                       title="Arm the goal; your next message becomes the objective"
                     >
                       Arm next message
@@ -710,7 +892,7 @@ export default function MainPanel({
                   <button
                     onClick={resumeGoal}
                     disabled={busy}
-                    className="px-3 py-1.5 bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/40 rounded text-sm hover:bg-accent-cyan/30 disabled:opacity-40"
+                    className="px-3 py-1.5 btn-primary text-sm disabled:opacity-40"
                   >
                     Resume
                   </button>
@@ -718,7 +900,7 @@ export default function MainPanel({
                 {goal && !GOAL_TERMINAL.includes(goal.state) && (
                   <button
                     onClick={saveGoalForm}
-                    className="px-3 py-1.5 border border-border rounded text-sm hover:bg-bg-tertiary"
+                    className="px-3 py-1.5 border border-border rounded-md text-sm hover:bg-bg-tertiary"
                   >
                     Save
                   </button>
@@ -726,7 +908,7 @@ export default function MainPanel({
                 {goal && (
                   <button
                     onClick={clearGoal}
-                    className="px-3 py-1.5 border border-accent-red/40 text-accent-red rounded text-sm hover:bg-accent-red/10"
+                    className="px-3 py-1.5 border border-accent-red/40 text-accent-red rounded-md text-sm hover:bg-accent-red/10"
                   >
                     Remove goal
                   </button>

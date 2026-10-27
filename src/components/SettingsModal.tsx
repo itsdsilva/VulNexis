@@ -108,9 +108,9 @@ export default function SettingsModal({ onClose, onConnectionChange }: SettingsM
   const providerInfo = PROVIDERS[ai.provider];
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="w-[560px] max-h-[90vh] overflow-y-auto bg-bg-secondary border border-border rounded-lg">
-        <div className="h-10 border-b border-border flex items-center justify-between px-4">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="w-[560px] max-h-[90vh] overflow-y-auto bg-bg-elevated border border-border rounded-lg shadow-pop">
+        <div className="h-10 border-b border-bordermuted flex items-center justify-between px-4">
           <div className="flex gap-3">
             <button onClick={() => setTab('ssh')} className={`text-sm ${tab === 'ssh' ? 'text-accent-cyan font-semibold' : 'text-text-secondary'}`}>
               Kali SSH

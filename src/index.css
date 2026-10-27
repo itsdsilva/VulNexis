@@ -2,8 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* VulNexis premium theme — warm near-black canvas, hairline borders,
-   humanist sans UI, monospace for terminal/code, restrained accents. */
+/* VulNexis theme — Notion-style neutral dark: flat surfaces, hairline
+   borders, hover-revealed controls, humanist sans UI, monospace for
+   terminal/code, one restrained blue accent for primary actions. */
 
 @font-face {
   font-family: 'Inter';
@@ -35,21 +36,23 @@
 }
 
 :root {
-  --bg-primary: #12100f;
-  --bg-secondary: #181614;
-  --bg-tertiary: #201d1a;
-  --bg-elevated: #262220;
-  --border: #34302c;
-  --border-muted: #262220;
-  --text-primary: #f0eeea;
-  --text-secondary: #bcb8b1;
-  --text-muted: #8a8580;
-  --text-disabled: #5c5854;
-  --accent-cyan: #56b4ff;
-  --accent-green: #46c285;
-  --accent-amber: #e8a33d;
-  --accent-red: #e5655e;
+  --bg-primary: #191919;
+  --bg-secondary: #1e1e1e;
+  --bg-tertiary: #252525;
+  --bg-elevated: #2a2a2a;
+  --border: #383838;
+  --border-muted: #2d2d2d;
+  --text-primary: #e8e8e6;
+  --text-secondary: #a6a6a3;
+  --text-muted: #7d7d7a;
+  --text-disabled: #575754;
+  --accent-cyan: #4d9ff2;
+  --accent-green: #53b483;
+  --accent-amber: #d9a542;
+  --accent-red: #e26f65;
   --accent-purple: #a78bfa;
+  --accent-orange: #f28b30;
+  --accent-blue: #2f8fe5;
 }
 
 * {
@@ -66,18 +69,12 @@ html, body, #root {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-size: 13px;
-  line-height: 1.55;
-  letter-spacing: 0.005em;
-}
-
-/* soft warm glow from the top, like a lit workbench */
-body {
-  background-image: radial-gradient(1200px 500px at 50% -220px, rgba(240, 238, 234, 0.045), transparent 70%);
+  line-height: 1.6;
 }
 
 button, input, select, textarea {
   font-family: inherit;
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
 }
 
 code, pre, .font-mono {
@@ -85,73 +82,85 @@ code, pre, .font-mono {
 }
 
 :focus-visible {
-  outline: 1px solid rgba(86, 180, 255, 0.55);
+  outline: 2px solid rgba(77, 159, 242, 0.5);
   outline-offset: 1px;
+  border-radius: 3px;
 }
 
-/* Scrollbar — thin, warm, quiet */
+/* Scrollbar — thin, neutral, quiet */
 ::-webkit-scrollbar {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #312d29;
+  background: #3a3a3a;
   border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #433d38;
+  background: #474747;
 }
 
 ::selection {
-  background: rgba(86, 180, 255, 0.28);
+  background: rgba(77, 159, 242, 0.30);
 }
 
 @layer components {
-  /* Hairline card */
+  /* Hairline card — same surface, one quiet border (Notion callout feel) */
   .card {
-    background-color: var(--bg-secondary);
+    background-color: var(--bg-elevated);
     border: 1px solid var(--border-muted);
-    border-radius: 12px;
+    border-radius: 8px;
   }
 
-  /* Uppercase tracked micro label (INSTANCE / REMOTE style) */
+  /* Uppercase tracked micro section label */
   .micro-label {
     font-size: 10px;
     line-height: 1.2;
-    letter-spacing: 0.09em;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    font-weight: 600;
+    font-weight: 500;
     color: var(--text-muted);
   }
 
+  /* Notion-style tag: square-ish, quiet, no pill */
   .chip {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    padding: 2px 9px;
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    background-color: var(--bg-tertiary);
+    padding: 1px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    background-color: transparent;
     font-size: 11px;
     color: var(--text-secondary);
   }
 
-  /* Primary CTA */
+  /* Primary CTA — Notion blue */
   .btn-primary {
-    background-color: var(--text-primary);
-    color: #17140f;
-    border-radius: 999px;
-    font-weight: 600;
+    background-color: var(--accent-blue);
+    color: #ffffff;
+    border-radius: 6px;
+    font-weight: 500;
   }
   .btn-primary:hover {
-    background-color: #ffffff;
+    background-color: #3d9bef;
   }
   .btn-primary:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* Ghost row/button — hover-revealed background, no border */
+  .ghost-row {
+    border-radius: 6px;
+    color: var(--text-secondary);
+  }
+  .ghost-row:hover {
+    background-color: var(--bg-tertiary);
+    color: var(--text-primary);
   }
 }
 

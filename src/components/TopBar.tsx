@@ -26,44 +26,34 @@ export default function TopBar({ mission, workspace, connected, onConnectionChan
 
   return (
     <>
-      <header className="h-12 bg-bg-secondary/90 backdrop-blur border-b border-bordermuted flex items-center px-4 gap-4 select-none">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <img src="/logo_32.png" alt="VulNexis" className="w-7 h-7 rounded-md shadow-card" />
-          <div className="leading-none">
-            <div className="font-semibold text-[13px] tracking-[0.02em]">VulNexis</div>
-            <div className="micro-label mt-0.5">Security Operations</div>
-          </div>
-        </div>
-
-        <div className="flex-1 flex items-center gap-3 text-xs text-text-secondary min-w-0">
-          <span
-            className={`chip ${connected ? 'border-accent-green/30 text-accent-green' : 'border-accent-red/30 text-accent-red'}`}
-            title={connected ? 'Kali VM reachable over SSH' : 'Connect a Kali VM in Settings'}
-          >
+      <header className="h-11 bg-bg-primary flex items-center px-3 gap-3 select-none shrink-0">
+        <div className="flex-1 flex items-center gap-2.5 text-xs min-w-0">
+          <span className="flex items-center gap-1.5" title={connected ? 'Kali VM reachable over SSH' : 'Connect a Kali VM in Settings'}>
             <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-accent-green' : 'bg-accent-red'}`}></span>
-            Kali {connected ? 'online' : 'offline'}
+            <span className={connected ? 'text-accent-green' : 'text-accent-red'}>Kali {connected ? 'online' : 'offline'}</span>
           </span>
           <span className="h-4 w-px bg-bordermuted"></span>
-          <span className="truncate">
+          <span className="truncate text-text-muted">
             {mission ? (
               <>
-                <span className="text-text-muted">Mission&nbsp;·&nbsp;</span>
+                <span>Mission</span>
+                <span className="mx-1.5 text-text-disabled">/</span>
                 <span className="text-text-primary font-medium">{mission.name}</span>
-                <span className="text-text-muted"> — {targetCount} targets</span>
+                <span> — {targetCount} targets</span>
               </>
             ) : (
-              <span className="text-text-muted">{WORKSPACE_LABEL[workspace]}</span>
+              <span>{WORKSPACE_LABEL[workspace]}</span>
             )}
           </span>
           <span className="h-4 w-px bg-bordermuted"></span>
-          <span className="chip font-mono text-[10px]">
+          <span className="font-mono text-[10px] text-text-muted whitespace-nowrap">
             ${usage.cost.toFixed(4)} · {usage.total.toLocaleString()} tok · {usage.calls} calls
           </span>
         </div>
 
         <button
           onClick={() => setOpen(true)}
-          className="px-3.5 py-1.5 text-xs font-medium text-text-secondary border border-bordermuted rounded-full hover:text-text-primary hover:border-border hover:bg-bg-tertiary"
+          className="px-2.5 py-1.5 text-xs text-text-secondary rounded-md hover:bg-bg-tertiary hover:text-text-primary"
         >
           Settings
         </button>

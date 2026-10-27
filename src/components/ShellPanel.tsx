@@ -61,19 +61,20 @@ export default function ShellPanel({ onCollapse }: ShellPanelProps) {
   };
 
   return (
-    <div className="h-64 bg-bg-secondary border-t border-border flex flex-col">
-      <div className="h-8 border-b border-border flex items-center justify-between px-3">
+    <div className="h-64 bg-bg-secondary border-t border-bordermuted flex flex-col shrink-0">
+      <div className="h-9 border-b border-bordermuted flex items-center justify-between px-3">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold">Kali Shell</span>
-          <span className="text-xs text-text-secondary">manual mode</span>
+          <span className="text-xs font-medium">Kali Shell</span>
+          <span className="text-xs text-text-muted">manual mode</span>
         </div>
         <div className="flex items-center gap-2">
           {busy && <span className="text-xs text-accent-amber">running…</span>}
-          <button onClick={onCollapse} className="text-text-secondary hover:text-text-primary text-xs">×</button>
+          <button onClick={onCollapse} className="text-text-muted hover:text-text-primary text-xs px-1">×
+          </button>
         </div>
       </div>
 
-      <div className="flex-1 bg-black p-2 overflow-y-auto font-mono text-xs">
+      <div className="flex-1 bg-[#141414] p-2 overflow-y-auto font-mono text-xs">
         {lines.map((line, i) => (
           <div
             key={i}
@@ -82,7 +83,7 @@ export default function ShellPanel({ onCollapse }: ShellPanelProps) {
                 ? 'text-accent-cyan'
                 : line.type === 'err'
                 ? 'text-accent-red'
-                : 'text-text-primary whitespace-pre-wrap'
+                : 'text-text-secondary whitespace-pre-wrap'
             }
           >
             {line.type === 'cmd' ? `$ ${line.text}` : line.text}
@@ -90,14 +91,14 @@ export default function ShellPanel({ onCollapse }: ShellPanelProps) {
         ))}
       </div>
 
-      <div className="flex items-center gap-2 border-t border-border px-2 py-1">
+      <div className="flex items-center gap-2 border-t border-bordermuted px-2 py-1.5">
         <span className="text-accent-cyan font-mono text-xs">$</span>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
           placeholder="type a command (e.g. whoami) and press Enter"
-          className="flex-1 bg-transparent outline-none font-mono text-xs text-text-primary"
+          className="flex-1 bg-transparent outline-none font-mono text-xs text-text-primary placeholder:text-text-disabled"
         />
       </div>
     </div>

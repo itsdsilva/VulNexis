@@ -92,12 +92,12 @@ export default function RunCompareModal({
   const anyRunning = runs.some((r) => runningIds.has(r.id));
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
-        className="bg-bg-primary border border-border rounded-lg w-[900px] max-w-[95vw] max-h-[85vh] flex flex-col"
+        className="bg-bg-elevated border border-border rounded-lg shadow-pop w-[900px] max-w-[95vw] max-h-[85vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="h-11 border-b border-border flex items-center px-4 gap-2">
+        <div className="h-11 border-b border-bordermuted flex items-center px-4 gap-2">
           <span className="font-medium text-sm">{group.name}</span>
           {mission && <span className="text-xs text-text-secondary">· {mission.name}</span>}
           <div className="flex-1" />

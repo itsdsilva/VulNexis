@@ -80,9 +80,9 @@ export default function TasksModal({ mission, onClose, onRunTask, onOpenSession,
   };
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-      <div className="w-[620px] max-h-[85vh] overflow-y-auto bg-bg-secondary border border-border rounded-lg">
-        <div className="h-10 border-b border-border flex items-center justify-between px-4">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+      <div className="w-[620px] max-h-[85vh] overflow-y-auto bg-bg-elevated border border-border rounded-lg shadow-pop">
+        <div className="h-10 border-b border-bordermuted flex items-center justify-between px-4">
           <span className="text-sm font-semibold">Scheduled Tasks — {mission.name}</span>
           <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-base">×</button>
         </div>

@@ -62,12 +62,12 @@ export default function MultiRunModal({ missionName, onClose, onLaunch }: MultiR
   const valid = prompt.trim().length > 0 && rows.length > 0;
 
   return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
-        className="bg-bg-primary border border-border rounded-lg w-[560px] max-h-[85vh] flex flex-col"
+        className="bg-bg-elevated border border-border rounded-lg shadow-pop w-[560px] max-h-[85vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="h-11 border-b border-border flex items-center px-4">
+        <div className="h-11 border-b border-bordermuted flex items-center px-4">
           <span className="font-medium text-sm">Multi-run — {missionName}</span>
           <div className="flex-1" />
           <button onClick={onClose} className="text-text-secondary hover:text-text-primary text-sm px-1">
