@@ -1,0 +1,161 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* VulNexis premium theme — warm near-black canvas, hairline borders,
+   humanist sans UI, monospace for terminal/code, restrained accents. */
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/inter-var-latin.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('/fonts/ibm-plex-mono-600.woff2') format('woff2');
+}
+
+:root {
+  --bg-primary: #12100f;
+  --bg-secondary: #181614;
+  --bg-tertiary: #201d1a;
+  --bg-elevated: #262220;
+  --border: #34302c;
+  --border-muted: #262220;
+  --text-primary: #f0eeea;
+  --text-secondary: #bcb8b1;
+  --text-muted: #8a8580;
+  --text-disabled: #5c5854;
+  --accent-cyan: #56b4ff;
+  --accent-green: #46c285;
+  --accent-amber: #e8a33d;
+  --accent-red: #e5655e;
+  --accent-purple: #a78bfa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 13px;
+  line-height: 1.55;
+  letter-spacing: 0.005em;
+}
+
+/* soft warm glow from the top, like a lit workbench */
+body {
+  background-image: radial-gradient(1200px 500px at 50% -220px, rgba(240, 238, 234, 0.045), transparent 70%);
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+
+code, pre, .font-mono {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+:focus-visible {
+  outline: 1px solid rgba(86, 180, 255, 0.55);
+  outline-offset: 1px;
+}
+
+/* Scrollbar — thin, warm, quiet */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #312d29;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #433d38;
+}
+
+::selection {
+  background: rgba(86, 180, 255, 0.28);
+}
+
+@layer components {
+  /* Hairline card */
+  .card {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-muted);
+    border-radius: 12px;
+  }
+
+  /* Uppercase tracked micro label (INSTANCE / REMOTE style) */
+  .micro-label {
+    font-size: 10px;
+    line-height: 1.2;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 9px;
+    border: 1px solid var(--border-muted);
+    border-radius: 999px;
+    background-color: var(--bg-tertiary);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  /* Primary CTA */
+  .btn-primary {
+    background-color: var(--text-primary);
+    color: #17140f;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .btn-primary:hover {
+    background-color: #ffffff;
+  }
+  .btn-primary:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  opacity: 0.3;
+}
