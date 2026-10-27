@@ -28,7 +28,20 @@ export function parseScopeText(domains: string, ips: string, wildcards: string, 
   const split = (s: string) =>
     s
       .split(/[\n,;]+/)
-      .map((x) => x.trim())
+      .map((x) => {
+        let t = x.trim();
+        if (!t) return '';
+        try {
+          if (/^https?:\/\//i.test(t)) {
+            const u = new URL(t);
+            t = u.hostname;
+          }
+        } catch {
+          /* fall through */
+        }
+        t = t.replace(/\/.*$/, '').replace(/:\d+$/, '').toLowerCase();
+        return t;
+      })
       .filter((x) => x.length > 0);
   return {
     domains: split(domains),
@@ -49,11 +62,28 @@ export function scopeToText(scope: MissionScope) {
 
 /** Checks if a target (host or IP) is in scope for the mission. Out-of-scope always wins. */
 export function isInScope(target: string, scope: MissionScope): boolean {
-  const t = target.trim().toLowerCase();
+  let t = target.trim().toLowerCase();
   if (!t) return false;
+  try {
+    if (/^https?:\/\//i.test(t)) {
+      t = new URL(t).hostname.toLowerCase();
+    }
+  } catch {
+    /* fall through */
+  }
+  t = t.replace(/\/.*$/, '').replace(/:\d+$/, '');
 
   const matches = (pattern: string) => {
-    const p = pattern.trim().toLowerCase();
+    let p = pattern.trim().toLowerCase();
+    if (!p) return false;
+    try {
+      if (/^https?:\/\//i.test(p)) {
+        p = new URL(p).hostname.toLowerCase();
+      }
+    } catch {
+      /* fall through */
+    }
+    p = p.replace(/\/.*$/, '').replace(/:\d+$/, '');
     if (p === t) return true;
     if (p.startsWith('*.')) {
       const base = p.slice(2);
@@ -71,17 +101,47 @@ export function isInScope(target: string, scope: MissionScope): boolean {
 /** Load and save missions to localStorage (later moves to SQLite) */
 const KEY = 'vulnexis_missions_v1';
 
+const normalizeScope = (scope: MissionScope): MissionScope => {
+  const norm = (s: string) => {
+    let t = s.trim().toLowerCase();
+    if (!t) return '';
+    try {
+      if (/^https?:\/\//i.test(t)) t = new URL(t).hostname.toLowerCase();
+    } catch {
+      /* ignore */
+    }
+    t = t.replace(/\/.*$/, '').replace(/:\d+$/, '');
+    return t;
+  };
+  return {
+    domains: (scope.domains || []).map(norm).filter(Boolean),
+    ips: (scope.ips || []).map(norm).filter(Boolean),
+    wildcards: (scope.wildcards || []).map(norm).filter(Boolean),
+    outOfScope: (scope.outOfScope || []).map(norm).filter(Boolean),
+  };
+};
+
 export function loadMissions(): Mission[] {
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw) as Mission[];
+    if (raw) {
+      const parsed = JSON.parse(raw) as Mission[];
+      if (Array.isArray(parsed)) {
+        const fixed = parsed.map((m) => ({ ...m, scope: normalizeScope(m.scope) }));
+        // Save back normalized form
+        localStorage.setItem(KEY, JSON.stringify(fixed));
+        return fixed;
+      }
+      return parsed;
+    }
     // Migrate missions saved under the old store.ts key
     const legacy = localStorage.getItem('vulnexis.missions');
     if (legacy) {
       const parsed = JSON.parse(legacy) as Mission[];
       if (Array.isArray(parsed)) {
-        localStorage.setItem(KEY, JSON.stringify(parsed));
-        return parsed;
+        const fixed = parsed.map((m) => ({ ...m, scope: normalizeScope(m.scope) }));
+        localStorage.setItem(KEY, JSON.stringify(fixed));
+        return fixed;
       }
     }
     return [];
@@ -92,6 +152,23 @@ export function loadMissions(): Mission[] {
 
 export function saveMissions(missions: Mission[]) {
   localStorage.setItem(KEY, JSON.stringify(missions));
+}
+
+export function updateMission(updated: Mission) {
+  const all = loadMissions();
+  const idx = all.findIndex((m) => m.id === updated.id);
+  if (idx >= 0) {
+    all[idx] = { ...updated };
+    saveMissions(all);
+    return all;
+  }
+  return all;
+}
+
+export function deleteMission(id: string) {
+  const all = loadMissions().filter((m) => m.id !== id);
+  saveMissions(all);
+  return all;
 }
 
 export function newMissionId(): string {

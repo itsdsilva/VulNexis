@@ -13,6 +13,7 @@ import {
   hostnameOf,
   toolTargetInScope,
 } from './tools';
+import { browserClick, browserLaunch, browserNavigate, browserSnapshot, browserType } from './browser';
 
 const AGENT_EXTRAS: Record<string, string> = {
   pentest: 'Follow a balanced pentest methodology: recon, enumeration, then targeted testing.',
@@ -83,7 +84,7 @@ Be helpful and concise.`;
   };
   const intensity = mission.intensity ?? 'normal';
   const bb = mission.kind === 'bugbounty';
-  return `You are VulNexis, an expert bug bounty and penetration testing agent operating through the user's Kali Linux shell over SSH.
+  return `You are VulNexis, an expert Web Application Penetration Testing (WAPT) agent with a built-in browser. You can drive the browser to map authenticated apps, fill forms, click flows, capture requests/responses, and identify vulnerabilities. You also have Kali SSH tools available.
 
 MISSION SCOPE (STRICT - never target anything outside this):
 - Domains: ${sc.domains.length ? sc.domains.join(', ') : 'none'}
@@ -102,10 +103,11 @@ AGENT FOCUS: ${AGENT_EXTRAS[agent] ?? AGENT_EXTRAS.pentest}
 
 RULES:
 1. Authorized testing only. No destructive actions, no DoS, no credential brute-forcing, no exploit payloads for live targets.
-2. Prefer safe, passive reconnaissance. One action per response.
-3. Targets must be inside the mission scope.
-4. If a command fails, read the error and adapt.
-5. Be concise.
+2. For WAPT: start with browser_launch + browser_navigate to the in-scope URL, take browser_snapshot to map forms/links/inputs, discover auth flows. Test methodically for: IDOR, broken access control, auth/session flaws, XSS, CSRF, SQLi, SSRF, file upload, business logic. Document findings with evidence.
+3. Prefer safe testing. One action per response.
+4. Targets must be inside the mission scope.
+5. If a command fails, read the error and adapt.
+6. Be concise and actionable.
 
 Respond ONLY with a single JSON object (no markdown, no code fences):
 - {"action":"run_tool","tool":"<tool name>","target":"<in-scope target>","params":{...},"reason":"<why>"}
@@ -344,6 +346,47 @@ export async function runTurn(
           });
           opts.onUpdate(session);
           break;
+        }
+
+        // Handle built-in browser tools
+        if (command.startsWith('browser:')) {
+          try {
+            const parts = command.split(/\s+/);
+            const op = parts[0];
+            if (op === 'browser:launch') {
+              const out = await browserLaunch(parts[1] !== 'false');
+              session = append(session, { role: 'tool', text: `Browser launched: ${out}` });
+              opts.onUpdate(session);
+            } else if (op === 'browser:navigate') {
+              const url = parts.slice(1).join(' ');
+              const out = await browserNavigate(url);
+              session = append(session, { role: 'tool', text: `Navigated: ${out}` });
+              opts.onUpdate(session);
+            } else if (op === 'browser:snapshot') {
+              const snap = await browserSnapshot();
+              const summary = `URL: ${snap.url}\nTitle: ${snap.title}\nForms: ${snap.forms.length}\nLinks: ${snap.links.length}\nInputs: ${snap.inputs.length}\nHTML: ${snap.html.slice(0, 800)}...`;
+              session = append(session, { role: 'tool', text: summary });
+              opts.onUpdate(session);
+            } else if (op === 'browser:click') {
+              const sel = parts.slice(1).join(' ');
+              await browserClick({ selector: sel });
+              session = append(session, { role: 'tool', text: `Clicked: ${sel}` });
+              opts.onUpdate(session);
+            } else if (op === 'browser:type') {
+              const sel = parts[1];
+              const val = parts.slice(2).join(' ');
+              await browserType(sel, val);
+              session = append(session, { role: 'tool', text: `Typed into ${sel}` });
+              opts.onUpdate(session);
+            } else {
+              session = append(session, { role: 'error', text: `Unknown browser op: ${op}` });
+              opts.onUpdate(session);
+            }
+          } catch (e) {
+            session = append(session, { role: 'error', text: String(e) });
+            opts.onUpdate(session);
+          }
+          continue;
         }
 
         const cached = cacheGet(command);

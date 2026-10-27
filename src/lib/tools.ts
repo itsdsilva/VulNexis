@@ -6,6 +6,7 @@
 import type { MissionScope } from './missions';
 import { isInScope } from './missions';
 
+
 export type ToolRisk = 'low' | 'medium' | 'high';
 
 export interface ToolParam {
@@ -31,6 +32,54 @@ const args = (p: Record<string, string>, key = 'additional_args') =>
   (p[key] ?? '').trim().length ? p[key].trim().split(/\s+/) : [];
 
 export const TOOLS: ToolSpec[] = [
+  {
+    name: 'browser_launch',
+    category: 'web',
+    description: 'Launch built-in headless browser for authenticated WAPT.',
+    risk: 'low',
+    targetKind: 'url',
+    params: [{ name: 'headless', description: 'true/false', default: 'true' }],
+    build: (target, p) => `browser:launch ${p.headless || 'true'} ${target}`,
+  },
+  {
+    name: 'browser_navigate',
+    category: 'web',
+    description: 'Navigate browser to in-scope URL.',
+    risk: 'low',
+    targetKind: 'url',
+    params: [],
+    build: (target) => `browser:navigate ${target}`,
+  },
+  {
+    name: 'browser_snapshot',
+    category: 'web',
+    description: 'Get current page snapshot (forms, links, inputs).',
+    risk: 'low',
+    targetKind: 'url',
+    params: [],
+    build: () => 'browser:snapshot',
+  },
+  {
+    name: 'browser_click',
+    category: 'web',
+    description: 'Click element by CSS selector.',
+    risk: 'low',
+    targetKind: 'url',
+    params: [{ name: 'selector', description: 'CSS selector' }],
+    build: (_t, p) => `browser:click ${p.selector || ''}`,
+  },
+  {
+    name: 'browser_type',
+    category: 'web',
+    description: 'Type text into element by CSS selector.',
+    risk: 'low',
+    targetKind: 'url',
+    params: [
+      { name: 'selector', description: 'CSS selector' },
+      { name: 'value', description: 'Text to type' },
+    ],
+    build: (_t, p) => `browser:type ${p.selector || ''} ${p.value || ''}`,
+  },
   {
     name: 'nmap',
     category: 'recon',

@@ -23,6 +23,24 @@ export interface Workflow {
 
 export const WORKFLOWS: Workflow[] = [
   {
+    id: 'webapp-audit',
+    name: 'Web App Audit',
+    description:
+      'Authenticated-capable WAPT: launch browser, map surface, discover forms/params, crawl, test with nuclei/nikto and analyze for vulns.',
+    steps: [
+      { name: 'Launch Browser', tool: 'browser_launch', params: { headless: 'true' } },
+      { name: 'Navigate', tool: 'browser_navigate' },
+      { name: 'Snapshot', tool: 'browser_snapshot' },
+      { name: 'Technologies', tool: 'whatweb' },
+      { name: 'WAF', tool: 'wafw00f' },
+      { name: 'Directories', tool: 'gobuster' },
+      { name: 'Crawl', tool: 'katana' },
+      { name: 'Params', tool: 'arjun' },
+      { name: 'Nuclei', tool: 'nuclei', params: { severity: 'high,critical,medium' } },
+      { name: 'Nikto', tool: 'nikto' },
+    ],
+  },
+  {
     id: 'recon',
     name: 'Recon Sweep',
     description:
@@ -53,7 +71,7 @@ export const WORKFLOWS: Workflow[] = [
       { name: 'Directories', tool: 'gobuster' },
       { name: 'Crawl JS', tool: 'katana' },
       { name: 'Hidden params', tool: 'arjun' },
-      { name: 'Archive URLs', tool: 'waybackurls' },
+      { name: 'Archive URLs', tool: 'gau' },
     ],
   },
   {
@@ -131,6 +149,47 @@ export async function runWorkflow(
 
     try {
       const { spec, command } = buildToolCommand(step.tool, target, step.params);
+      // Browser tools don't need SSH scope check
+      if (command.startsWith('browser:')) {
+        try {
+          const parts = command.split(/\s+/);
+          const op = parts[0];
+          const { browserClick, browserLaunch, browserNavigate, browserSnapshot, browserType } = await import('./browser');
+          if (op === 'browser:launch') {
+            await browserLaunch(parts[1] !== 'false');
+            session = append(session, { role: 'tool', text: 'Browser launched' });
+            opts.onUpdate(session);
+            continue;
+          } else if (op === 'browser:navigate') {
+            const url = target.startsWith('http') ? target : `https://${target}`;
+            await browserNavigate(url);
+            session = append(session, { role: 'tool', text: `Navigated to ${url}` });
+            opts.onUpdate(session);
+            continue;
+          } else if (op === 'browser:snapshot') {
+            const snap = await browserSnapshot();
+            const summary = `URL: ${snap.url}\nTitle: ${snap.title}\nForms: ${snap.forms.length}\nLinks: ${snap.links.length}\nInputs: ${snap.inputs.length}`;
+            session = append(session, { role: 'tool', text: summary });
+            opts.onUpdate(session);
+            outputs.push(`## ${step.name} (browser)\n${summary}`);
+            continue;
+          } else if (op === 'browser:click') {
+            await browserClick({ selector: parts.slice(1).join(' ') });
+            session = append(session, { role: 'tool', text: 'Clicked element' });
+            opts.onUpdate(session);
+            continue;
+          } else if (op === 'browser:type') {
+            await browserType(parts[1], parts.slice(2).join(' '));
+            session = append(session, { role: 'tool', text: 'Typed into element' });
+            opts.onUpdate(session);
+            continue;
+          }
+        } catch (e) {
+          session = append(session, { role: 'error', text: String(e) });
+          opts.onUpdate(session);
+          continue;
+        }
+      }
       if (!toolTargetInScope(target, mission.scope)) {
         session = append(session, { role: 'error', text: `Refused: ${hostnameOf(target)} is out of scope.` });
         opts.onUpdate(session);

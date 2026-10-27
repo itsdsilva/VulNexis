@@ -6,10 +6,21 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
 use tauri::State;
+use chromiumoxide::browser::{Browser, BrowserConfig};
+use chromiumoxide::cdp::browser_protocol::page;
+use chromiumoxide::Page;
+use futures_util::StreamExt;
+use std::sync::Arc as StdArc;
+use base64::Engine as _;
 
 #[derive(Default)]
 struct SshState {
     handle: Mutex<Option<Handle<ClientHandler>>>,
+}
+
+struct BrowserState {
+    browser: Mutex<Option<Browser>>,
+    page: Mutex<Option<Arc<Page>>>,
 }
 
 // ---------- LLM (multi-provider) ----------
@@ -492,6 +503,179 @@ async fn http_fetch(req: HttpFetchReq) -> Result<HttpFetchRes, String> {
     })
 }
 
+#[derive(Deserialize)]
+struct BrowserLaunchReq {
+    headless: Option<bool>,
+}
+
+#[tauri::command]
+async fn browser_launch(req: Option<BrowserLaunchReq>, state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let mut browser_guard = state.browser.lock().await;
+    if browser_guard.is_some() {
+        return Ok("already_running".to_string());
+    }
+    let headless = req.as_ref().and_then(|r| r.headless).unwrap_or(true);
+    let mut config_builder = BrowserConfig::builder();
+    if headless {
+        config_builder = config_builder.with_head();
+    }
+    // Try to use system chrome if available
+    let config = config_builder.build().map_err(|e| format!("Browser config error: {e}"))?;
+    let (browser, mut handler) = Browser::launch(config).await.map_err(|e| format!("Browser launch failed: {e}"))?;
+    tokio::task::spawn(async move {
+        while let Some(_event) = handler.next().await {}
+    });
+    let page = browser.new_page("about:blank").await.map_err(|e| format!("New page failed: {e}"))?;
+    let mut page_guard = state.page.lock().await;
+    *page_guard = Some(Arc::new(page));
+    *browser_guard = Some(browser);
+    Ok("launched".to_string())
+}
+
+#[derive(Deserialize)]
+struct BrowserNavReq {
+    url: String,
+}
+
+#[tauri::command]
+async fn browser_navigate(req: BrowserNavReq, state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    page.goto(&req.url).await.map_err(|e| format!("Navigate failed: {e}"))?;
+    // Wait a bit for JS
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    Ok(page.url().await.map_err(|e| e.to_string())?.unwrap_or(req.url))
+}
+
+#[derive(Serialize)]
+struct BrowserSnapshot {
+    url: String,
+    title: String,
+    html: String,
+    forms: Vec<serde_json::Value>,
+    links: Vec<String>,
+    inputs: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn browser_snapshot(state: tauri::State<'_, StdArc<BrowserState>>) -> Result<BrowserSnapshot, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    let url = page.url().await.map_err(|e| e.to_string())?.unwrap_or_default();
+    let title = page.get_title().await.map_err(|e| e.to_string())?.unwrap_or_default();
+    let html = page.content().await.map_err(|e| format!("Get content failed: {e}"))?;
+    // Extract forms/inputs/links via JS
+    let js = r#"(function(){
+        const forms=[]; document.querySelectorAll('form').forEach((f,i)=>{
+            const fields=[]; f.querySelectorAll('input,select,textarea').forEach(el=>{
+                fields.push({name:el.name||el.id||'',type:el.type||el.tagName,tag:el.tagName,value:el.value||''});
+            });
+            forms.push({index:i,action:f.action||location.href,method:(f.method||'get').toLowerCase(),fields});
+        });
+        const links=[]; document.querySelectorAll('a[href]').forEach(a=>{if(a.href) links.push(a.href);});
+        const inputs=[]; document.querySelectorAll('input,textarea,select').forEach(el=>{
+            inputs.push({name:el.name||'',id:el.id||'',type:el.type||el.tagName,placeholder:el.placeholder||''});
+        });
+        return JSON.stringify({forms,links:links.slice(0,200),inputs:inputs.slice(0,100)});
+    })()"#;
+    let res = page.evaluate(js).await.map_err(|e| format!("Eval failed: {e}"))?;
+    let val: serde_json::Value = res.into_value().unwrap_or(serde_json::json!({}));
+    let forms = val.get("forms").cloned().unwrap_or(serde_json::json!([])).as_array().cloned().unwrap_or_default();
+    let links_arr = val.get("links").cloned().unwrap_or(serde_json::json!([])).as_array().cloned().unwrap_or_default();
+    let links: Vec<String> = links_arr.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
+    let inputs_arr = val.get("inputs").cloned().unwrap_or(serde_json::json!([])).as_array().cloned().unwrap_or_default();
+    let inputs: Vec<serde_json::Value> = inputs_arr;
+    // Truncate html
+    let html_trunc = if html.len() > 150000 { format!("{}...[truncated {} bytes]", &html[..150000], html.len()) } else { html };
+    Ok(BrowserSnapshot { url, title, html: html_trunc, forms, links, inputs })
+}
+
+#[derive(Deserialize)]
+struct BrowserClickReq {
+    selector: Option<String>,
+    text: Option<String>,
+}
+
+#[tauri::command]
+async fn browser_click(req: BrowserClickReq, state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    if let Some(sel) = req.selector {
+        let el = page.find_element(&sel).await.map_err(|e| format!("Element not found: {e}"))?;
+        el.click().await.map_err(|e| format!("Click failed: {e}"))?;
+    } else if let Some(txt) = req.text {
+        let js = format!(r#"(function(){{const els=Array.from(document.querySelectorAll('button,a,input[type=submit]'));const el=els.find(x=>x.textContent&&x.textContent.includes({:?})); if(!el) throw new Error('not found'); el.click(); return 'ok';}})()"#, txt);
+        page.evaluate(js).await.map_err(|e| format!("Click by text failed: {e}"))?;
+    } else {
+        return Err("selector or text required".to_string());
+    }
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    Ok("clicked".to_string())
+}
+
+#[derive(Deserialize)]
+struct BrowserTypeReq {
+    selector: String,
+    value: String,
+}
+
+#[tauri::command]
+async fn browser_type(req: BrowserTypeReq, state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    let el = page.find_element(&req.selector).await.map_err(|e| format!("Element not found: {e}"))?;
+    el.type_str(&req.value).await.map_err(|e| format!("Type failed: {e}"))?;
+    Ok("typed".to_string())
+}
+
+#[derive(Deserialize)]
+struct BrowserEvalReq {
+    script: String,
+}
+
+#[tauri::command]
+async fn browser_eval(req: BrowserEvalReq, state: tauri::State<'_, StdArc<BrowserState>>) -> Result<serde_json::Value, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    let res = page.evaluate(req.script).await.map_err(|e| format!("Eval failed: {e}"))?;
+    Ok(res.into_value().unwrap_or(serde_json::Value::Null))
+}
+
+#[tauri::command]
+async fn browser_get_cookies(state: tauri::State<'_, StdArc<BrowserState>>) -> Result<serde_json::Value, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    let cookies = page.get_cookies().await.map_err(|e| format!("Get cookies failed: {e}"))?;
+    Ok(serde_json::to_value(cookies).unwrap_or(serde_json::json!([])))
+}
+
+#[tauri::command]
+async fn browser_screenshot(state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let page_guard = state.page.lock().await;
+    let page = page_guard.as_ref().ok_or("Browser not launched")?.clone();
+    drop(page_guard);
+    // Try basic screenshot
+    let data = page.screenshot(chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams::default()).await.map_err(|e| format!("Screenshot failed: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(data))
+}
+
+#[tauri::command]
+async fn browser_close(state: tauri::State<'_, StdArc<BrowserState>>) -> Result<String, String> {
+    let mut browser_guard = state.browser.lock().await;
+    if let Some(mut b) = browser_guard.take() {
+        let _ = b.close().await;
+    }
+    let mut page_guard = state.page.lock().await;
+    *page_guard = None;
+    Ok("closed".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -501,6 +685,10 @@ pub fn run() {
                 .build(),
         )
         .manage(SshState::default())
+        .manage(StdArc::new(BrowserState {
+            browser: Mutex::new(None),
+            page: Mutex::new(None),
+        }))
         .invoke_handler(tauri::generate_handler![
             ssh_connect,
             ssh_disconnect,
@@ -508,7 +696,16 @@ pub fn run() {
             ssh_detect_tools,
             llm_chat,
             llm_stream::llm_chat_stream,
-            http_fetch
+            http_fetch,
+            browser_launch,
+            browser_navigate,
+            browser_snapshot,
+            browser_click,
+            browser_type,
+            browser_eval,
+            browser_get_cookies,
+            browser_screenshot,
+            browser_close
         ])
         .run(tauri::generate_context!())
         .expect("error while building tauri application");
