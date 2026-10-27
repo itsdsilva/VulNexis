@@ -319,6 +319,8 @@ export interface RunTurnOpts {
   onUpdate: (s: Session) => void;
   onUsage: (u: { prompt: number; completion: number; total: number; calls: number }) => void;
   onFork?: (s: Session) => void; // reserved: lets callers snapshot a session mid-turn
+  /** Polled between steps and before each tool run — true ends the turn gracefully. */
+  shouldStop?: () => boolean;
 }
 
 export async function runTurn(
@@ -369,6 +371,7 @@ export async function runTurn(
   // Mission-less chats behave like a normal AI app (ChatGPT-style): one
   // straight LLM call, no tool protocol, no Kali needed.
   if (!mission) {
+    if (opts.shouldStop?.()) return session;
     const history = toChatHistory(session.messages).slice(-24);
     const msgs = [
       { role: 'system', content: systemPrompt(null, [], session.agent, false) },
@@ -410,6 +413,15 @@ export async function runTurn(
       session = append(session, {
         role: 'error',
         text: `Token budget reached (${used.toLocaleString()}/${opts.budget.toLocaleString()}). Stopping auto-run.`,
+      });
+      opts.onUpdate(session);
+      break;
+    }
+
+    if (opts.shouldStop?.()) {
+      session = append(session, {
+        role: 'assistant',
+        text: '(stopped by user — the agent halted here. Send a message to continue.)',
       });
       opts.onUpdate(session);
       break;
@@ -496,6 +508,7 @@ export async function runTurn(
 
     let stopTurn = false;
     for (const a of actions) {
+      if (opts.shouldStop?.()) break; // stop requested — skip the rest; the note lands on the next step check
       if (a.kind === 'tasks') {
         const tasks: SessionTask[] = a.tasks
           .filter((t: any) => t && typeof t.title === 'string' && t.title.trim())
@@ -745,7 +758,12 @@ export async function runGoalLoop(
   }
 
   for (;;) {
-    if (opts.shouldStop()) return session; // paused — resume re-arms the loop
+    if (opts.shouldStop()) {
+      // Normalize back to pending so the strip doesn't show a "running" goal.
+      session = withGoal(session, { ...session.goal!, state: 'pending', note: 'Paused — resume to continue.' });
+      opts.onUpdate(session);
+      return session;
+    }
     let goal = session.goal!;
     if (goal.turns >= goal.maxTurns) {
       session = withGoal(session, { ...goal, state: 'blocked', note: `Turn cap reached (${goal.maxTurns}).` });

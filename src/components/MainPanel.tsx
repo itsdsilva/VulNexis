@@ -354,8 +354,9 @@ export default function MainPanel({
         onUpdate: onUpdateSession,
         onUsage,
         onFork,
+        shouldStop: () => pauseRef.current,
       });
-      if (after.goal && !GOAL_TERMINAL.includes(after.goal.state)) {
+      if (!pauseRef.current && after.goal && !GOAL_TERMINAL.includes(after.goal.state)) {
         await startGoalLoop(after);
       }
     } finally {
@@ -439,6 +440,11 @@ export default function MainPanel({
     setGoalDialog(false);
     pauseRef.current = false;
     await startGoalLoop(start);
+  };
+
+  /** Stop button: halt the agent after its current step (plain turns and goal-loop turns alike). */
+  const stopRun = () => {
+    pauseRef.current = true;
   };
 
   const pauseGoal = () => {
@@ -817,14 +823,26 @@ export default function MainPanel({
                     <line x1="12" y1="19" x2="12" y2="22" />
                   </svg>
                 </button>
-                <button
-                  onClick={send}
-                  disabled={busy || !input.trim()}
-                  className="w-7 h-7 rounded-full btn-primary flex items-center justify-center text-sm leading-none disabled:!opacity-30"
-                  title="Send"
-                >
-                  ↑
-                </button>
+                {busy && phase !== 'idle' ? (
+                  <button
+                    onClick={stopRun}
+                    className="w-7 h-7 rounded-full flex items-center justify-center border border-accent-red/50 text-accent-red hover:bg-accent-red/10 transition-colors"
+                    title="Stop the agent — finishes the current step, then halts"
+                  >
+                    <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor">
+                      <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" />
+                    </svg>
+                  </button>
+                ) : (
+                  <button
+                    onClick={send}
+                    disabled={busy || !input.trim()}
+                    className="w-7 h-7 rounded-full btn-primary flex items-center justify-center text-sm leading-none disabled:!opacity-30"
+                    title="Send"
+                  >
+                    ↑
+                  </button>
+                )}
               </div>
             </div>
           </div>
